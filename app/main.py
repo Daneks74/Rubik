@@ -532,9 +532,25 @@ async def api_debug_team():
     espn = get_espn()
     if not espn:
         return {"error": "no espn"}
-    team = espn.league.teams[0]
 
-    # Get league stat categories
+    # Check for current user's team
+    swid = espn.espn_swid.strip('{}')
+    teams_info = []
+    for t in espn.league.teams:
+        owners = getattr(t, 'owners', [])
+        owner_ids = []
+        for o in owners:
+            if isinstance(o, dict):
+                owner_ids.append(o.get('id', str(o)))
+            else:
+                owner_ids.append(str(o))
+        teams_info.append({
+            "name": t.team_name,
+            "owners": owner_ids,
+            "is_mine": any(swid in oid for oid in owner_ids),
+        })
+
+    return {"swid": swid, "teams": teams_info}
     cats = espn.get_stat_categories()
     cat_info = [{"name": c["name"], "display": c.get("display_name"), "type": c.get("type")} for c in cats]
 
