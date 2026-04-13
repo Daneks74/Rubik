@@ -574,11 +574,34 @@ async def api_debug_team():
                 }
             break
 
+    # Roster slot info for each player
+    roster_slots = []
+    for p in team.roster:
+        attrs = [a for a in dir(p) if not a.startswith('_')]
+        slot_info = {
+            "name": p.name,
+            "position": getattr(p, 'position', None),
+            "lineupSlot": getattr(p, 'lineupSlot', None),
+            "eligibleSlots": getattr(p, 'eligibleSlots', None),
+            "injuryStatus": getattr(p, 'injuryStatus', None),
+            "attrs": attrs,
+        }
+        roster_slots.append(slot_info)
+
+    # League roster settings
+    roster_settings = getattr(settings, 'roster', None)
+    roster_settings_str = str(roster_settings)[:500] if roster_settings else "NOT_FOUND"
+    roster_slots_setting = getattr(settings, 'roster_slots', None)
+    roster_slots_str = str(roster_slots_setting)[:500] if roster_slots_setting else "NOT_FOUND"
+
     return {
         "team_name": team.team_name,
         "wins": team.wins, "losses": team.losses, "ties": getattr(team, 'ties', 0),
         "league_categories": cat_info,
         "settings_attrs": settings_values,
+        "roster_slots": roster_slots,
+        "roster_setting": roster_settings_str,
+        "roster_slots_setting": roster_slots_str,
         "pitcher_periods": player_periods,
         "hitter_periods": hitter_periods,
     }
