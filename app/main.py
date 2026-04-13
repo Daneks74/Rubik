@@ -501,16 +501,14 @@ async def api_debug_team():
     cats = espn.get_stat_categories()
     cat_info = [{"id": c["id"], "name": c["name"], "display": c.get("display_name")} for c in cats]
 
-    # Also check what stat_categories raw objects look like
+    # Inspect league settings object fully
     settings = espn.league.settings
-    raw_cats = []
-    for cat in getattr(settings, 'stat_categories', []):
-        raw_cats.append({
-            "id": getattr(cat, 'id', None),
-            "display_name": getattr(cat, 'display_name', None),
-            "abbr": getattr(cat, 'abbr', None),
-            "attrs": [a for a in dir(cat) if not a.startswith('_')],
-        })
+    settings_attrs = [a for a in dir(settings) if not a.startswith('_')]
+    settings_values = {}
+    for a in settings_attrs:
+        val = getattr(settings, a, None)
+        if not callable(val):
+            settings_values[a] = str(val)[:200]
 
     # Check both period keys for first player
     player_periods = {}
@@ -544,7 +542,7 @@ async def api_debug_team():
         "team_name": team.team_name,
         "wins": team.wins, "losses": team.losses, "ties": getattr(team, 'ties', 0),
         "league_categories": cat_info,
-        "raw_stat_categories": raw_cats[:5],
+        "settings_attrs": settings_values,
         "pitcher_periods": player_periods,
         "hitter_periods": hitter_periods,
     }
