@@ -387,20 +387,43 @@ async def api_my_roster(team_name: str = Query(None)):
     if not espn:
         return JSONResponse(status_code=400, content={"error": "ESPN league not configured. Add ESPN_S2 and ESPN_SWID to enable this feature."})
 
+    import math
+
     categories = espn.get_stat_categories()
     cat_names = [c["name"] for c in categories]
     inverse_cats = {c["name"] for c in categories if c.get("is_inverse")}
+    off_cats = [c["name"] for c in categories if c["type"] == "offense"]
+    pit_cats = [c["name"] for c in categories if c["type"] == "pitching"]
 
+    # Detect the user's own team via SWID
+    swid = espn.espn_swid.strip('{}')
+    my_team_name = None
+    teams_list = []
+    for t in espn.league.teams:
+        owners = getattr(t, 'owners', [])
+        for o in owners:
+            oid = o.get('id', str(o)) if isinstance(o, dict) else str(o)
+            if swid in oid:
+                my_team_name = t.team_name
+                break
+        teams_list.append({"id": t.team_id, "name": t.team_name})
+
+    # Auto-select user's team if no team specified
     if team_name is None:
-        return {
-            "teams": [{"id": t.team_id, "name": t.team_name} for t in espn.league.teams],
-            "needs_selection": True,
-        }
+        if my_team_name:
+            team_name = my_team_name
+        else:
+            return {
+                "teams": teams_list,
+                "my_team": my_team_name,
+                "needs_selection": True,
+            }
 
     team_data = espn.get_my_team(team_name)
     players = team_data["players"]
     all_proj = get_projections()
 
+    # Collect all league player stats for percentiles and z-scores
     all_players = []
     for team in espn.league.teams:
         for p in team.roster:
@@ -414,6 +437,16 @@ async def api_my_roster(team_name: str = Query(None)):
                 if stat_name not in stat_values:
                     stat_values[stat_name] = []
                 stat_values[stat_name].append(val)
+
+    # Mean/stddev for z-scores (VBR)
+    stat_dist = {}
+    for sname, vals in stat_values.items():
+        n = len(vals)
+        if n > 1:
+            mean = sum(vals) / n
+            variance = sum((v - mean) ** 2 for v in vals) / n
+            std = math.sqrt(variance) if variance > 0 else 1.0
+            stat_dist[sname] = {"mean": mean, "std": std}
 
     stat_percentiles = {}
     for sname, vals in stat_values.items():
@@ -448,6 +481,18 @@ async def api_my_roster(team_name: str = Query(None)):
                     elif val >= pct["p25"]: grades[stat_name] = "avg"
                     else: grades[stat_name] = "poor"
 
+        # VBR: sum of z-scores across relevant league categories
+        is_pitcher = p.position in ('SP', 'RP', 'P') or p.lineup_slot == 'P'
+        relevant_cats = pit_cats if is_pitcher else off_cats
+        vbr = 0.0
+        for cat in relevant_cats:
+            val = p.stats.get(cat)
+            if val is not None and cat in stat_dist:
+                z = (val - stat_dist[cat]["mean"]) / stat_dist[cat]["std"]
+                if cat in inverse_cats:
+                    z = -z
+                vbr += z
+
         player_list.append({
             "name": p.name, "position": p.position, "team": p.pro_team,
             "lineup_slot": p.lineup_slot,
@@ -455,14 +500,16 @@ async def api_my_roster(team_name: str = Query(None)):
             "pct_owned": p.percent_owned,
             "current_stats": p.stats, "projected_stats": p.projected_stats,
             "projections": projections,
-            "total_points": p.total_points, "projected_points": p.projected_points,
             "grades": grades,
+            "vbr": round(vbr, 1),
         })
 
     return {
         "team_name": team_data["team_name"],
         "players": player_list,
         "categories": categories,
+        "teams": teams_list,
+        "my_team": my_team_name,
         "needs_selection": False,
     }
 

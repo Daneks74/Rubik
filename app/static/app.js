@@ -258,25 +258,37 @@ function setRankingsMode(mode) {
 
 // ── My Roster ──
 
+// Position color map
+const POS_COLORS = {
+  'C': '#e879f9', '1B': '#f97316', '2B': '#22d3ee', '3B': '#facc15',
+  'SS': '#a78bfa', 'IF': '#6366f1', '1B/3B': '#fb923c', '2B/SS': '#818cf8',
+  'LF': '#4ade80', 'CF': '#34d399', 'RF': '#2dd4bf', 'OF': '#22c55e',
+  'DH': '#f472b6', 'UTIL': '#94a3b8',
+  'SP': '#ef4444', 'RP': '#f97316', 'P': '#ef4444',
+  'BE': '#64748b', 'IL': '#dc2626',
+};
+
 async function renderMyRoster(el) {
-  if (!state.selectedTeam) {
-    const data = await api('/api/my-roster');
-    if (data.needs_selection) {
-      let html = `<div class="page-header"><h2>My Roster</h2><p>Select your team</p></div><div class="team-grid">`;
-      for (const t of data.teams) {
-        html += `<div class="team-select-card" onclick="selectTeam('${t.name.replace(/'/g, "\\'")}')">
-          <div class="label">Team</div><div class="tname">${t.name}</div></div>`;
-      }
-      html += '</div>';
-      el.innerHTML = html;
-      return;
+  const url = state.selectedTeam
+    ? `/api/my-roster?team_name=${encodeURIComponent(state.selectedTeam)}`
+    : '/api/my-roster';
+  state.rosterData = await api(url);
+  const data = state.rosterData;
+
+  if (data.needs_selection) {
+    let html = `<div class="page-header"><h2>My Roster</h2><p>Select your team</p></div><div class="team-grid">`;
+    for (const t of data.teams) {
+      html += `<div class="team-select-card" onclick="selectTeam('${t.name.replace(/'/g, "\\'")}')">
+        <div class="label">Team</div><div class="tname">${t.name}</div></div>`;
     }
+    html += '</div>';
+    el.innerHTML = html;
+    return;
   }
 
-  state.rosterData = await api(`/api/my-roster?team_name=${encodeURIComponent(state.selectedTeam)}`);
-  const data = state.rosterData;
   const cats = data.categories || [];
   const players = data.players || [];
+  const teams = data.teams || [];
   const projSources = new Set();
   players.forEach(p => Object.keys(p.projections || {}).forEach(s => projSources.add(s)));
   const sources = ['ESPN', ...Array.from(projSources).filter(s => s !== 'ESPN')];
@@ -300,6 +312,11 @@ async function renderMyRoster(el) {
     return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
   });
 
+  // Team dropdown
+  const teamOptions = teams.map(t =>
+    `<option value="${t.name.replace(/"/g, '&quot;')}" ${t.name === data.team_name ? 'selected' : ''}>${t.name}</option>`
+  ).join('');
+
   let html = `
     <div class="page-header">
       <h2>${data.team_name}</h2>
@@ -307,34 +324,37 @@ async function renderMyRoster(el) {
     </div>
     <div class="controls">
       <div class="control-group">
+        <label>Team</label>
+        <select class="control-select" onchange="selectTeam(this.value)">${teamOptions}</select>
+      </div>
+      <div class="control-group">
         <label>Proj</label>
         <div class="pill-group">
           ${sources.map(s => `<button class="pill ${state.projSource === s ? 'active' : ''}" onclick="setProjSource('${s}')">${s}</button>`).join('')}
         </div>
       </div>
-      <button class="refresh-btn" onclick="selectTeam(null)" style="width:auto;padding:6px 12px;font-size:11px">Change</button>
     </div>`;
 
   if (activeHitters.length > 0) {
     html += '<h3 style="margin-bottom:12px;font-size:15px;font-weight:600">Hitters</h3>';
-    html += buildRosterTable(activeHitters, offCats);
+    html += buildRosterTable(activeHitters, offCats, 'hitters');
   }
   if (activePitchers.length > 0) {
     html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Pitchers</h3>';
-    html += buildRosterTable(activePitchers, pitCats);
+    html += buildRosterTable(activePitchers, pitCats, 'pitchers');
   }
   if (benchHitters.length > 0 || benchPitchers.length > 0) {
     html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Bench</h3>';
     const benchAll = [...benchHitters, ...benchPitchers];
     const benchCats = benchHitters.length > benchPitchers.length ? offCats : pitCats;
-    html += buildRosterTable(benchAll, benchCats);
+    html += buildRosterTable(benchAll, benchCats, 'bench');
   }
   if (ilPlayers.length > 0) {
     html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600;color:var(--red)">Injured List</h3>';
     const ilHitters = ilPlayers.filter(p => !isPitcherPos(p.position));
     const ilPitchersList = ilPlayers.filter(p => isPitcherPos(p.position));
     const ilCats = ilHitters.length >= ilPitchersList.length ? offCats : pitCats;
-    html += buildRosterTable(ilPlayers, ilCats);
+    html += buildRosterTable(ilPlayers, ilCats, 'il');
   }
 
   el.innerHTML = html;
@@ -344,10 +364,26 @@ function isPitcherPos(pos) {
   return ['SP', 'RP', 'P'].includes(pos);
 }
 
-function buildRosterTable(players, cats) {
-  let html = `<div class="table-wrap"><table>
-    <thead><tr><th>Slot</th><th>Player</th><th>Pts</th>`;
-  for (const c of cats) html += `<th title="${c.display_name || c.name}">${c.display_name || c.name}</th>`;
+function posColor(pos) {
+  return POS_COLORS[pos] || 'var(--text-secondary)';
+}
+
+function vbrBadge(vbr) {
+  if (vbr >= 2) return 'score-hot';
+  if (vbr >= 0) return 'score-warm';
+  return 'score-cold';
+}
+
+function buildRosterTable(players, cats, tableId) {
+  let html = `<div class="table-wrap"><table data-table="${tableId}">
+    <thead><tr>
+      <th onclick="sortRosterTable('${tableId}','slot')">Slot</th>
+      <th onclick="sortRosterTable('${tableId}','name')">Player</th>
+      <th onclick="sortRosterTable('${tableId}','vbr')" title="Value Based Ranking: sum of z-scores across league categories">VBR</th>`;
+  for (const c of cats) {
+    const label = c.display_name || c.name;
+    html += `<th onclick="sortRosterTable('${tableId}','${c.name}')" title="${label}">${label}</th>`;
+  }
   html += '</tr></thead><tbody>';
 
   for (const p of players) {
@@ -355,10 +391,11 @@ function buildRosterTable(players, cats) {
       ? `<span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
 
     const slot = p.lineup_slot || p.position;
+    const color = posColor(slot);
     html += `<tr>
-      <td><span class="player-pos">${slot}</span></td>
+      <td><span class="pos-badge" style="background:${color}20;color:${color};border:1px solid ${color}40">${slot}</span></td>
       <td><span class="player-name">${p.name}</span><span class="player-team">${p.team} · ${p.position}</span> ${inj}</td>
-      <td>${p.total_points}</td>`;
+      <td><span class="score-badge ${vbrBadge(p.vbr)}" style="font-size:11px;padding:2px 8px">${p.vbr > 0 ? '+' : ''}${p.vbr}</span></td>`;
 
     for (const c of cats) {
       const val = p.current_stats?.[c.name];
@@ -372,6 +409,42 @@ function buildRosterTable(players, cats) {
 
   html += '</tbody></table></div>';
   return html;
+}
+
+// Sortable roster tables
+let rosterSortState = {};
+function sortRosterTable(tableId, key) {
+  const table = document.querySelector(`table[data-table="${tableId}"]`);
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+
+  // Toggle direction
+  const prev = rosterSortState[tableId];
+  const asc = (prev && prev.key === key) ? !prev.asc : (key === 'name' || key === 'slot');
+  rosterSortState[tableId] = { key, asc };
+
+  // Find column index
+  const headers = Array.from(table.querySelectorAll('thead th'));
+  let colIdx;
+  if (key === 'slot') colIdx = 0;
+  else if (key === 'name') colIdx = 1;
+  else if (key === 'vbr') colIdx = 2;
+  else colIdx = headers.findIndex(h => h.textContent === key || h.getAttribute('title') === key);
+  if (colIdx < 0) colIdx = headers.findIndex(h => h.onclick?.toString().includes(key));
+
+  rows.sort((a, b) => {
+    const aText = a.cells[colIdx]?.textContent?.trim() || '';
+    const bText = b.cells[colIdx]?.textContent?.trim() || '';
+    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+    if (!isNaN(aNum) && !isNaN(bNum)) {
+      return asc ? aNum - bNum : bNum - aNum;
+    }
+    return asc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
 }
 
 function selectTeam(name) {
