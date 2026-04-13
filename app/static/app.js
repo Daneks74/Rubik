@@ -2,6 +2,9 @@
 
 const state = {
   currentPage: 'sp-picker',
+  hasEspn: false,
+  leagues: [],
+  activeLeagueId: null,
   leagueInfo: null,
   spData: null,
   rankingsData: null,
@@ -85,14 +88,17 @@ async function renderSPPicker(el) {
   const today = new Date().toISOString().split('T')[0];
   const tmrw = nextDay(today);
 
+  const isPublic = data.mode === 'public';
+  const subtitle = isPublic ? 'All probable starters — next 7 days' : 'Free agent starters — next 7 days';
+
   let html = `
     <div class="page-header">
       <h2>SP Picker</h2>
-      <p>Free agent starters — next 7 days</p>
+      <p>${subtitle}</p>
     </div>
     <div class="summary-row">
-      <div class="summary-card"><div class="label">Free Agent SPs</div><div class="value accent">${data.total_free_agents}</div></div>
-      <div class="summary-card"><div class="label">With Starts</div><div class="value green">${data.total_with_starts}</div></div>
+      ${!isPublic ? `<div class="summary-card"><div class="label">Free Agent SPs</div><div class="value accent">${data.total_free_agents}</div></div>` : ''}
+      <div class="summary-card"><div class="label">${isPublic ? 'Starters' : 'With Starts'}</div><div class="value green">${data.total_with_starts}</div></div>
       <div class="summary-card"><div class="label">Days</div><div class="value">${dates.length}</div></div>
       <div class="summary-card"><div class="label">Data</div><div class="value" style="font-size:14px">${data.has_odds ? 'Vegas + Records' : data.has_records ? 'Team Records' : 'Projections'}</div></div>
     </div>`;
@@ -118,7 +124,12 @@ async function renderSPPicker(el) {
     // Desktop table
     html += `<div class="table-wrap sp-table"><table>
       <thead><tr>
-        <th>#</th><th>Pitcher</th><th>Matchup</th><th>Proj</th><th>Own%</th>`;
+        <th>#</th><th>Pitcher</th><th>Matchup</th>`;
+    if (isPublic) {
+      html += '<th>ERA</th><th>WHIP</th><th>K/9</th>';
+    } else {
+      html += '<th>Proj</th><th>Own%</th>';
+    }
     if (data.has_odds) html += '<th>ML</th><th>O/U</th>';
     html += '<th>Opp Rec</th><th>Score</th></tr></thead><tbody>';
 
@@ -128,9 +139,12 @@ async function renderSPPicker(el) {
       html += `<tr>
         <td>${i + 1}</td>
         <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span></td>
-        <td>${mu}</td>
-        <td>${p.projected_pts || '—'}</td>
-        <td>${p.pct_owned}%</td>`;
+        <td>${mu}</td>`;
+      if (isPublic) {
+        html += `<td>${fmtStat(p.era, 'ERA')}</td><td>${fmtStat(p.whip, 'WHIP')}</td><td>${fmtStat(p.k9, 'K/9')}</td>`;
+      } else {
+        html += `<td>${p.projected_pts || '—'}</td><td>${p.pct_owned}%</td>`;
+      }
       if (data.has_odds) html += `<td>${fmtML(p.moneyline)}</td><td>${p.over_under || '—'}</td>`;
       html += `<td>${p.opp_record || '—'}</td>
         <td><span class="score-badge ${sc}">${p.score}</span></td></tr>`;
@@ -147,8 +161,9 @@ async function renderSPPicker(el) {
           <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">${p.team}</span></div>
           <div class="pc-meta">${mu}${p.opp_record ? ' (' + p.opp_record + ')' : ''}</div>
           <div class="pc-details">
-            <span>Proj: ${p.projected_pts || '—'}</span>
-            <span>Own: ${p.pct_owned}%</span>
+            ${isPublic
+              ? `<span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span><span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
+              : `<span>Proj: ${p.projected_pts || '—'}</span><span>Own: ${p.pct_owned}%</span>`}
             ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
             ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
           </div>
@@ -484,15 +499,89 @@ async function refreshData() {
   }
 }
 
+// ── League switching ──
+
+async function loadLeagues() {
+  try {
+    const data = await api('/api/leagues');
+    state.hasEspn = data.has_espn;
+    state.leagues = data.leagues || [];
+    state.activeLeagueId = data.active_id;
+  } catch (e) {
+    console.error('Failed to load leagues:', e);
+  }
+}
+
+function renderLeagueSwitcher() {
+  const switcher = document.getElementById('league-switcher');
+  const nameEl = document.getElementById('league-name');
+  const select = document.getElementById('league-select');
+
+  if (!state.hasEspn || state.leagues.length === 0) {
+    if (switcher) switcher.style.display = 'none';
+    if (nameEl) nameEl.textContent = 'SP Tracker (Public)';
+    return;
+  }
+
+  if (state.leagues.length === 1) {
+    if (switcher) switcher.style.display = 'none';
+    if (nameEl) nameEl.textContent = state.leagues[0].name;
+    return;
+  }
+
+  // Multiple leagues — show dropdown
+  if (switcher) switcher.style.display = 'block';
+  if (nameEl) nameEl.style.display = 'none';
+  if (select) {
+    select.innerHTML = state.leagues.map(l =>
+      `<option value="${l.id}" ${l.id === state.activeLeagueId ? 'selected' : ''}>${l.name}</option>`
+    ).join('');
+  }
+}
+
+async function switchLeague(leagueId) {
+  const id = parseInt(leagueId);
+  if (id === state.activeLeagueId) return;
+  await apiPost(`/api/switch-league?league_id=${id}`);
+  state.activeLeagueId = id;
+  state.leagueInfo = null;
+  state.spData = null;
+  state.rankingsData = null;
+  state.rosterData = null;
+  state.freeAgentsData = null;
+  state.selectedTeam = null;
+  renderLeagueSwitcher();
+  renderPage();
+}
+
+function updateNavVisibility() {
+  const espnPages = ['rankings', 'my-roster', 'free-agents'];
+  document.querySelectorAll('.nav-item').forEach(el => {
+    if (espnPages.includes(el.dataset.page)) {
+      el.style.display = state.hasEspn ? '' : 'none';
+    }
+  });
+  if (!state.hasEspn && espnPages.includes(state.currentPage)) {
+    state.currentPage = 'sp-picker';
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.page === 'sp-picker');
+    });
+  }
+}
+
 // ── Init ──
 
 document.addEventListener('DOMContentLoaded', async () => {
-  try {
-    state.leagueInfo = await api('/api/league');
-    const nameEl = document.getElementById('league-name');
-    if (nameEl) nameEl.textContent = state.leagueInfo.settings?.league_name || '';
-  } catch (e) {
-    console.error('Failed to load league info:', e);
+  await loadLeagues();
+  renderLeagueSwitcher();
+  updateNavVisibility();
+
+  if (state.hasEspn) {
+    try {
+      state.leagueInfo = await api('/api/league');
+    } catch (e) {
+      console.error('Failed to load league info:', e);
+    }
   }
 
   document.querySelectorAll('.nav-item').forEach(item => {

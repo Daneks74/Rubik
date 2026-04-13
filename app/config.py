@@ -1,36 +1,42 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
 
 
 @dataclass
 class AppConfig:
-    espn_league_id: int
-    espn_s2: str
-    espn_swid: str
-    season_year: int
+    espn_league_ids: list[int] = field(default_factory=list)
+    espn_s2: str = ""
+    espn_swid: str = ""
+    season_year: int = 2026
     odds_api_key: Optional[str] = None
+
+    @property
+    def has_espn(self) -> bool:
+        return bool(self.espn_s2 and self.espn_swid and self.espn_league_ids)
 
 
 def load_config() -> AppConfig:
     load_dotenv()
 
-    league_id = os.getenv("ESPN_LEAGUE_ID")
-    if not league_id:
-        raise ValueError("ESPN_LEAGUE_ID is required in .env")
+    # Support both ESPN_LEAGUE_IDS (comma-separated) and ESPN_LEAGUE_ID (single, backward compat)
+    league_ids = []
+    ids_str = os.getenv("ESPN_LEAGUE_IDS", "")
+    if ids_str:
+        league_ids = [int(x.strip()) for x in ids_str.split(",") if x.strip()]
+    else:
+        single_id = os.getenv("ESPN_LEAGUE_ID", "")
+        if single_id:
+            league_ids = [int(single_id)]
 
     espn_s2 = os.getenv("ESPN_S2", "")
     espn_swid = os.getenv("ESPN_SWID", "")
-    if not espn_s2 or not espn_swid:
-        raise ValueError("ESPN_S2 and ESPN_SWID cookies are required for private leagues. "
-                         "Get them from browser DevTools > Application > Cookies > espn.com")
-
     season_year = int(os.getenv("SEASON_YEAR", "2026"))
     odds_api_key = os.getenv("ODDS_API_KEY") or None
 
     return AppConfig(
-        espn_league_id=int(league_id),
+        espn_league_ids=league_ids,
         espn_s2=espn_s2,
         espn_swid=espn_swid,
         season_year=season_year,

@@ -40,20 +40,35 @@ STAT_ID_MAP = {
 
 
 class ESPNClient:
-    def __init__(self, config: AppConfig):
-        self.config = config
+    def __init__(self, league_id: int, espn_s2: str, espn_swid: str, season_year: int):
+        self.league_id = league_id
+        self.espn_s2 = espn_s2
+        self.espn_swid = espn_swid
+        self.season_year = season_year
         self._league = None
 
     @property
     def league(self) -> League:
         if self._league is None:
             self._league = League(
-                league_id=self.config.espn_league_id,
-                year=self.config.season_year,
-                espn_s2=self.config.espn_s2,
-                swid=self.config.espn_swid,
+                league_id=self.league_id,
+                year=self.season_year,
+                espn_s2=self.espn_s2,
+                swid=self.espn_swid,
             )
         return self._league
+
+    @staticmethod
+    def connect(league_id: int, config: AppConfig) -> "ESPNClient":
+        """Create an ESPNClient for a specific league."""
+        return ESPNClient(league_id, config.espn_s2, config.espn_swid, config.season_year)
+
+    def get_league_name(self) -> str:
+        """Quick call to get just the league name."""
+        try:
+            return getattr(self.league.settings, 'name', f'League {self.league_id}')
+        except Exception:
+            return f'League {self.league_id}'
 
     def get_league_settings(self) -> dict:
         """Get league name and scoring categories."""

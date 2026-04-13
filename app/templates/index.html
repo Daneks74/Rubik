@@ -17,6 +17,9 @@
     <aside class="sidebar">
       <div class="sidebar-brand">
         <h1>Fantasy Dashboard</h1>
+        <div class="league-switcher" id="league-switcher" style="display:none">
+          <select id="league-select" class="league-select" onchange="switchLeague(this.value)"></select>
+        </div>
         <div class="league-name" id="league-name">Loading...</div>
       </div>
       <nav class="sidebar-nav">
