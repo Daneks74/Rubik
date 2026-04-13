@@ -487,7 +487,7 @@ async def api_my_roster(team_name: str = Query(None)):
         vbr = 0.0
         for cat in relevant_cats:
             val = p.stats.get(cat)
-            if val is not None and cat in stat_dist:
+            if val is not None and isinstance(val, (int, float)) and cat in stat_dist:
                 z = (val - stat_dist[cat]["mean"]) / stat_dist[cat]["std"]
                 if cat in inverse_cats:
                     z = -z
