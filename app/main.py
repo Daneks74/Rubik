@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import load_config, AppConfig
-from app.espn_client import ESPNClient, STAT_ID_MAP
+from app.espn_client import ESPNClient, INVERSE_STATS
 from app.mlb_client import get_probable_starters, get_team_records
 from app.odds_client import get_mlb_odds
 from app.projections_client import fetch_all_projections, get_player_projections, _normalize_player_name
@@ -277,33 +277,38 @@ async def api_rankings(mode: str = Query("current", enum=["current", "projected"
     cat_names = [c["name"] for c in categories]
     inverse_cats = {c["name"] for c in categories if c.get("is_inverse")}
 
+    # Rate stats that shouldn't be summed across players
+    rate_stats = {"AVG", "OBP", "OPS", "SLG", "ERA", "WHIP", "K/9", "K/BB", "OBA", "OOBP", "WPCT", "SV%"}
+
     teams_data = []
     for team in espn.league.teams:
         team_stats = {}
         team_projected = {}
 
         for player in team.roster:
-            if not player.stats:
+            if not hasattr(player, 'stats') or not player.stats:
                 continue
-            for period_id, period_data in player.stats.items():
-                breakdown = period_data.get("breakdown", {})
-                proj_breakdown = period_data.get("projected_breakdown", {})
+            # Period 0 = season totals
+            period = player.stats.get(0, {})
+            breakdown = period.get("breakdown", {})
+            proj_breakdown = period.get("projected_breakdown", {})
 
-                for sid_str, val in breakdown.items():
-                    if isinstance(sid_str, str) and not sid_str.isdigit():
-                        continue
-                    sid = int(sid_str) if isinstance(sid_str, str) else sid_str
-                    sname = STAT_ID_MAP.get(sid, "")
-                    if sname in cat_names:
-                        team_stats[sname] = team_stats.get(sname, 0) + val
+            for key, val in breakdown.items():
+                if key in rate_stats:
+                    continue  # Handle rate stats separately
+                if key in cat_names:
+                    team_stats[key] = team_stats.get(key, 0) + val
 
-                for sid_str, val in proj_breakdown.items():
-                    if isinstance(sid_str, str) and not sid_str.isdigit():
-                        continue
-                    sid = int(sid_str) if isinstance(sid_str, str) else sid_str
-                    sname = STAT_ID_MAP.get(sid, "")
-                    if sname in cat_names:
-                        team_projected[sname] = team_projected.get(sname, 0) + val
+            for key, val in proj_breakdown.items():
+                if key in rate_stats:
+                    continue
+                if key in cat_names:
+                    team_projected[key] = team_projected.get(key, 0) + val
+
+        # Calculate rate stats from components
+        # AVG = H / AB, OBP = (H+BB+HBP)/(PA), ERA = ER*27/OUTS, WHIP = (P_H+P_BB)*3/OUTS
+        _calc_rate_stats(team_stats, team, espn, period_key=0, is_projected=False)
+        _calc_rate_stats(team_projected, team, espn, period_key=0, is_projected=True)
 
         teams_data.append({
             "team_id": team.team_id,
@@ -313,6 +318,7 @@ async def api_rankings(mode: str = Query("current", enum=["current", "projected"
             "standing": team.standing,
             "wins": team.wins,
             "losses": team.losses,
+            "ties": getattr(team, 'ties', 0),
             "current_stats": team_stats,
             "projected_stats": team_projected,
         })
@@ -339,6 +345,36 @@ async def api_rankings(mode: str = Query("current", enum=["current", "projected"
         t["overall_rank"] = i
 
     return {"teams": teams_data, "categories": categories, "mode": mode}
+
+
+def _calc_rate_stats(stats: dict, team, espn, period_key=0, is_projected=False):
+    """Calculate rate stats (AVG, ERA, WHIP, etc.) from component totals."""
+    totals = {"AB": 0, "H": 0, "PA": 0, "B_BB": 0, "HBP": 0,
+              "OUTS": 0, "ER": 0, "P_H": 0, "P_BB": 0}
+
+    bd_key = "projected_breakdown" if is_projected else "breakdown"
+    for player in team.roster:
+        if not hasattr(player, 'stats') or not player.stats:
+            continue
+        period = player.stats.get(period_key, {})
+        bd = period.get(bd_key, {})
+        for k in totals:
+            totals[k] += bd.get(k, 0)
+
+    if totals["AB"] > 0:
+        stats["AVG"] = round(totals["H"] / totals["AB"], 5)
+    if totals["PA"] > 0:
+        stats["OBP"] = round((totals["H"] + totals["B_BB"] + totals["HBP"]) / totals["PA"], 5)
+    if totals["AB"] > 0:
+        slg = stats.get("TB", 0) / totals["AB"] if totals["AB"] > 0 else 0
+        stats["SLG"] = round(slg, 5)
+        stats["OPS"] = round(stats.get("OBP", 0) + slg, 5)
+    if totals["OUTS"] > 0:
+        stats["ERA"] = round(totals["ER"] * 27 / totals["OUTS"], 3)
+        stats["WHIP"] = round((totals["P_H"] + totals["P_BB"]) * 3 / totals["OUTS"], 4)
+        stats["K/9"] = round(stats.get("K", 0) * 27 / totals["OUTS"], 2)
+    if totals["P_BB"] > 0:
+        stats["K/BB"] = round(stats.get("K", 0) / totals["P_BB"], 2)
 
 
 # ──────────────────────────────────────────────

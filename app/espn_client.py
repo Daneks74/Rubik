@@ -20,22 +20,33 @@ POSITION_MAP = {
     6: "UTIL", 7: "DH", 8: "SP", 9: "RP", 10: "P", 19: "IL",
 }
 
-STAT_ID_MAP = {
-    0: "AB", 1: "H", 2: "AVG", 3: "2B", 4: "3B", 5: "HR",
-    6: "XBH", 7: "1B", 8: "TB", 10: "SLUG", 11: "BB", 12: "IBB",
-    13: "HBP", 14: "SF", 15: "SH", 16: "SAC", 17: "PA",
-    20: "R", 21: "RBI", 22: "ROE", 23: "FC", 24: "E",
-    25: "SB", 26: "CS", 27: "GIDP", 28: "GDP",
-    29: "OBP", 30: "OPS",
-    33: "SO", 34: "K/BB",
-    37: "FPCT",
-    40: "IP", 41: "H_P", 42: "ER", 43: "K_P", 44: "BB_P",
-    45: "HR_P", 46: "GS", 47: "W", 48: "L", 49: "SV",
-    50: "ERA", 51: "WHIP", 53: "HLD", 54: "BS",
-    57: "QS", 58: "GP",
-    60: "K/9", 61: "BB/9", 62: "K/BB_P",
-    63: "SV+HLD", 65: "APP",
-    99: "TOTAL",
+# Standard H2H category sets — used to auto-detect league categories
+OFFENSE_STATS = {"AB", "H", "AVG", "2B", "3B", "HR", "XBH", "1B", "TB",
+                 "SLG", "B_BB", "HBP", "PA", "R", "RBI", "SB", "CS",
+                 "OBP", "OPS", "B_SO", "GDP", "SF", "SH", "RC"}
+PITCHING_STATS = {"OUTS", "P_H", "ER", "K", "P_BB", "P_HR", "GS", "W", "L",
+                  "SV", "ERA", "WHIP", "HLD", "BLSV", "QS", "K/9", "K/BB",
+                  "SV+HLD", "GP", "CG", "SVO"}
+
+# Common H2H scoring categories (keys as they appear in ESPN breakdowns)
+# These are the stats that typically count in roto/H2H leagues
+COMMON_OFFENSE_CATS = ["AVG", "R", "RBI", "HR", "SB", "OBP", "OPS", "SLG", "TB", "B_BB", "H", "B_SO"]
+COMMON_PITCHING_CATS = ["ERA", "WHIP", "K", "W", "SV", "QS", "HLD", "K/9", "SV+HLD", "OUTS", "K/BB"]
+
+# Stats where lower is better
+INVERSE_STATS = {"ERA", "WHIP", "L", "ER", "P_BB", "P_HR", "BLSV", "B_SO"}
+
+# Display-friendly names for breakdown keys
+DISPLAY_NAMES = {
+    "AVG": "AVG", "R": "R", "RBI": "RBI", "HR": "HR", "SB": "SB",
+    "OBP": "OBP", "OPS": "OPS", "SLG": "SLG", "H": "H", "B_BB": "BB",
+    "B_SO": "SO", "TB": "TB", "2B": "2B", "3B": "3B", "XBH": "XBH",
+    "CS": "CS", "GDP": "GDP", "AB": "AB", "PA": "PA", "SF": "SF",
+    "ERA": "ERA", "WHIP": "WHIP", "K": "K", "W": "W", "SV": "SV",
+    "QS": "QS", "HLD": "HLD", "K/9": "K/9", "K/BB": "K/BB",
+    "OUTS": "IP", "L": "L", "ER": "ER", "P_H": "H(P)", "P_BB": "BB(P)",
+    "P_HR": "HR(P)", "GS": "GS", "GP": "GP", "CG": "CG",
+    "SVO": "SVO", "BLSV": "BS", "SV+HLD": "SV+H",
 }
 
 
@@ -46,6 +57,7 @@ class ESPNClient:
         self.espn_swid = espn_swid
         self.season_year = season_year
         self._league = None
+        self._detected_categories = None
 
     @property
     def league(self) -> League:
@@ -70,23 +82,56 @@ class ESPNClient:
         except Exception:
             return f'League {self.league_id}'
 
+    def _detect_categories(self) -> list[dict]:
+        """Auto-detect league scoring categories from player breakdown data."""
+        if self._detected_categories is not None:
+            return self._detected_categories
+
+        # Collect all breakdown keys from a sample of players
+        offense_keys = set()
+        pitching_keys = set()
+        for team in self.league.teams:
+            for player in team.roster[:5]:
+                if not hasattr(player, 'stats') or not player.stats:
+                    continue
+                # Period 0 = season totals
+                period = player.stats.get(0, {})
+                bd = period.get("breakdown", {})
+                pos = getattr(player, 'position', '')
+                if pos in ('SP', 'RP', 'P'):
+                    pitching_keys.update(bd.keys())
+                else:
+                    offense_keys.update(bd.keys())
+            if offense_keys and pitching_keys:
+                break
+
+        # Match against known common categories
+        categories = []
+        for key in COMMON_OFFENSE_CATS:
+            if key in offense_keys:
+                categories.append({
+                    "name": key,
+                    "display_name": DISPLAY_NAMES.get(key, key),
+                    "type": "offense",
+                    "is_inverse": key in INVERSE_STATS,
+                })
+        for key in COMMON_PITCHING_CATS:
+            if key in pitching_keys:
+                categories.append({
+                    "name": key,
+                    "display_name": DISPLAY_NAMES.get(key, key),
+                    "type": "pitching",
+                    "is_inverse": key in INVERSE_STATS,
+                })
+
+        self._detected_categories = categories
+        return categories
+
     def get_league_settings(self) -> dict:
         """Get league name and scoring categories."""
         settings = self.league.settings
         scoring_type = getattr(settings, 'scoring_type', 'Unknown')
-
-        # Extract stat categories from the league's stat_categories
-        categories = []
-        stat_cats = getattr(settings, 'stat_categories', [])
-        for cat in stat_cats:
-            cat_id = getattr(cat, 'id', None)
-            cat_name = STAT_ID_MAP.get(cat_id, f"STAT_{cat_id}") if cat_id is not None else "Unknown"
-            categories.append({
-                "id": cat_id,
-                "name": cat_name,
-                "display_name": getattr(cat, 'display_name', cat_name),
-                "is_inverse": cat_name in ("ERA", "WHIP", "L", "ER", "BB_P", "HR_P", "BS"),
-            })
+        categories = self._detect_categories()
 
         return {
             "league_name": getattr(settings, 'name', 'Unknown League'),
@@ -96,49 +141,36 @@ class ESPNClient:
         }
 
     def get_stat_categories(self) -> list[dict]:
-        """Get the league's scoring categories split into offense/defense."""
-        settings = self.get_league_settings()
-        categories = settings.get("categories", [])
+        """Get the league's scoring categories split into offense/pitching."""
+        return self._detect_categories()
 
-        offense_stats = {"AB", "H", "AVG", "2B", "3B", "HR", "XBH", "1B", "TB",
-                         "SLUG", "BB", "HBP", "PA", "R", "RBI", "SB", "CS",
-                         "OBP", "OPS", "SO", "GIDP"}
-        pitching_stats = {"IP", "H_P", "ER", "K_P", "BB_P", "HR_P", "GS", "W", "L",
-                          "SV", "ERA", "WHIP", "HLD", "BS", "QS", "K/9", "BB/9",
-                          "K/BB_P", "SV+HLD", "APP"}
+    def _get_player_breakdown(self, player, period_key=0) -> dict:
+        """Get a player's stat breakdown for a period. Period 0 = season totals."""
+        if not hasattr(player, 'stats') or not player.stats:
+            return {}
+        period = player.stats.get(period_key, {})
+        return period.get("breakdown", {})
 
-        for cat in categories:
-            name = cat["name"]
-            if name in offense_stats:
-                cat["type"] = "offense"
-            elif name in pitching_stats:
-                cat["type"] = "pitching"
-            else:
-                cat["type"] = "other"
-
-        return categories
+    def _get_player_projected_breakdown(self, player) -> dict:
+        """Get a player's projected stat breakdown (season totals only)."""
+        if not hasattr(player, 'stats') or not player.stats:
+            return {}
+        period = player.stats.get(0, {})
+        return period.get("projected_breakdown", {})
 
     def get_teams_with_stats(self) -> list[dict]:
         """Get all teams with their current stats by category."""
-        categories = self.get_stat_categories()
         teams_data = []
 
         for team in self.league.teams:
             team_stats = {}
-            # Aggregate stats from roster
             for player in team.roster:
-                if player.stats:
-                    for period_id, period_stats in player.stats.items():
-                        # Use total stats (period '002026' or similar for season)
-                        breakdown = period_stats.get("breakdown", {})
-                        for stat_id_str, value in breakdown.items():
-                            if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
-                                continue
-                            stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
-                            stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
-                            if stat_name not in team_stats:
-                                team_stats[stat_name] = 0.0
-                            team_stats[stat_name] += value
+                bd = self._get_player_breakdown(player, period_key=0)
+                for key, value in bd.items():
+                    if key in team_stats:
+                        team_stats[key] = team_stats[key] + value
+                    else:
+                        team_stats[key] = value
 
             teams_data.append({
                 "team_id": team.team_id,
@@ -184,36 +216,16 @@ class ESPNClient:
         if isinstance(position, int):
             position = POSITION_MAP.get(position, 'Unknown')
 
-        # Get current and projected stats
-        current_stats = {}
-        projected_stats = {}
+        # Get current and projected stats directly from breakdowns (string keys)
+        current_stats = self._get_player_breakdown(player, period_key=0)
+        projected_stats = self._get_player_projected_breakdown(player)
+
         total_pts = 0.0
         proj_pts = 0.0
-
         if hasattr(player, 'stats') and player.stats:
             for period_id, period_data in player.stats.items():
-                breakdown = period_data.get("breakdown", {})
-                pts = period_data.get("points", 0) or 0
-                proj = period_data.get("projected_points", 0) or 0
-                proj_breakdown = period_data.get("projected_breakdown", {})
-
-                # Map stat IDs to names
-                for stat_id_str, value in breakdown.items():
-                    if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
-                        continue
-                    stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
-                    stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
-                    current_stats[stat_name] = value
-
-                for stat_id_str, value in proj_breakdown.items():
-                    if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
-                        continue
-                    stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
-                    stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
-                    projected_stats[stat_name] = value
-
-                total_pts += pts
-                proj_pts += proj
+                total_pts += period_data.get("points", 0) or 0
+                proj_pts += period_data.get("projected_points", 0) or 0
 
         pro_team = getattr(player, 'proTeam', 'FA')
         if isinstance(pro_team, int):
