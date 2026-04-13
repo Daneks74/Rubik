@@ -496,30 +496,55 @@ async def api_debug_team():
     if not espn:
         return {"error": "no espn"}
     team = espn.league.teams[0]
-    result = {
-        "team_name": team.team_name,
-        "wins": team.wins,
-        "losses": team.losses,
-        "ties": getattr(team, 'ties', 0),
-        "standing": team.standing,
-        "attrs": [a for a in dir(team) if not a.startswith('_')],
-    }
-    # Check for team-level stats
-    for attr in ['stats', 'stats_2025', 'team_stats', 'cumulative_score']:
-        val = getattr(team, attr, 'NOT_FOUND')
-        if val != 'NOT_FOUND':
-            result[f'team.{attr}'] = str(val)[:500]
 
-    # Check first player's stats structure
+    # Get league stat categories
+    cats = espn.get_stat_categories()
+    cat_info = [{"id": c["id"], "name": c["name"], "display": c.get("display_name")} for c in cats]
+
+    # Also check what stat_categories raw objects look like
+    settings = espn.league.settings
+    raw_cats = []
+    for cat in getattr(settings, 'stat_categories', []):
+        raw_cats.append({
+            "id": getattr(cat, 'id', None),
+            "display_name": getattr(cat, 'display_name', None),
+            "abbr": getattr(cat, 'abbr', None),
+            "attrs": [a for a in dir(cat) if not a.startswith('_')],
+        })
+
+    # Check both period keys for first player
+    player_periods = {}
     if team.roster:
         p = team.roster[0]
-        result["player0_name"] = p.name
-        result["player0_stats_keys"] = list(p.stats.keys()) if hasattr(p, 'stats') and p.stats else []
-        if p.stats:
-            first_key = list(p.stats.keys())[0]
-            period = p.stats[first_key]
-            result["player0_first_period_key"] = first_key
-            result["player0_first_period_keys"] = list(period.keys()) if isinstance(period, dict) else str(type(period))
-            bd = period.get("breakdown", {})
-            result["player0_breakdown_sample"] = dict(list(bd.items())[:10]) if bd else "empty"
-    return result
+        for period_key, period_data in (p.stats or {}).items():
+            bd = period_data.get("breakdown", {})
+            player_periods[str(period_key)] = {
+                "keys_in_period": list(period_data.keys()),
+                "breakdown_all_keys": list(bd.keys()),
+                "breakdown_sample": dict(list(bd.items())[:15]),
+                "points": period_data.get("points"),
+                "projected_points": period_data.get("projected_points"),
+            }
+
+    # Check a hitter too
+    hitter_periods = {}
+    for p in team.roster:
+        pos = getattr(p, 'position', '')
+        if pos not in ('SP', 'RP', 'P') and isinstance(pos, str):
+            for period_key, period_data in (p.stats or {}).items():
+                bd = period_data.get("breakdown", {})
+                hitter_periods[str(period_key)] = {
+                    "player": p.name,
+                    "breakdown_all_keys": list(bd.keys()),
+                    "breakdown_sample": dict(list(bd.items())[:15]),
+                }
+            break
+
+    return {
+        "team_name": team.team_name,
+        "wins": team.wins, "losses": team.losses, "ties": getattr(team, 'ties', 0),
+        "league_categories": cat_info,
+        "raw_stat_categories": raw_cats[:5],
+        "pitcher_periods": player_periods,
+        "hitter_periods": hitter_periods,
+    }
