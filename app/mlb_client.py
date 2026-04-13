@@ -91,3 +91,25 @@ def get_probable_starters(start_date: date, days_ahead: int = 7) -> list[Schedul
         current += timedelta(days=1)
 
     return results
+
+
+def get_team_records() -> dict[str, dict]:
+    """Fetch current MLB standings/records. Returns {team_abbrev: {wins, losses, pct}}."""
+    records = {}
+    try:
+        data = statsapi.standings_data(leagueId="103,104")
+    except Exception as e:
+        logger.warning("Failed to fetch MLB standings: %s", e)
+        return records
+
+    for div_id, div_data in data.items():
+        for team in div_data.get("teams", []):
+            name = team.get("name", "")
+            abbrev = TEAM_NAME_TO_ABBREV.get(name, "")
+            if abbrev:
+                w = team.get("w", 0)
+                l = team.get("l", 0)
+                pct = w / (w + l) if (w + l) > 0 else 0.5
+                records[abbrev] = {"wins": w, "losses": l, "pct": round(pct, 3)}
+
+    return records

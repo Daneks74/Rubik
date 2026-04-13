@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import load_config, AppConfig
 from app.espn_client import ESPNClient, STAT_ID_MAP
-from app.mlb_client import get_probable_starters
+from app.mlb_client import get_probable_starters, get_team_records
 from app.odds_client import get_mlb_odds
 from app.projections_client import fetch_all_projections, get_player_projections
 from app.matcher import match_pitchers_to_starts, match_start_to_odds
@@ -102,6 +102,10 @@ async def api_sp_picker():
     today = date.today()
     starts = get_probable_starters(today, days_ahead=7)
 
+    # Team records for matchup strength (always available, free)
+    records = get_team_records()
+
+    # Vegas odds (optional — only if API key is configured)
     odds_list = []
     if config.odds_api_key:
         odds_list = get_mlb_odds(config.odds_api_key)
@@ -110,7 +114,7 @@ async def api_sp_picker():
     recs = []
     for pitcher, start in matched:
         odds = match_start_to_odds(start, odds_list) if odds_list else None
-        rec = score_pitcher(pitcher, start, odds, free_agents)
+        rec = score_pitcher(pitcher, start, odds, free_agents, team_records=records)
         recs.append(rec)
 
     recs = rank_recommendations(recs)
@@ -120,6 +124,11 @@ async def api_sp_picker():
         d = rec.scheduled_start.game_date.isoformat()
         if d not in by_date:
             by_date[d] = []
+
+        # Team record info for display
+        opp_record = records.get(rec.scheduled_start.opponent_abbrev, {})
+        pitcher_record = records.get(rec.pitcher.pro_team, {})
+
         by_date[d].append({
             "name": rec.pitcher.name,
             "team": rec.pitcher.pro_team,
@@ -130,6 +139,9 @@ async def api_sp_picker():
             "moneyline": (rec.odds.home_moneyline if rec.scheduled_start.is_home else rec.odds.away_moneyline) if rec.odds else None,
             "win_prob": round(rec.win_probability * 100, 1) if rec.win_probability else None,
             "over_under": rec.odds.over_under if rec.odds else None,
+            "team_record": f"{pitcher_record.get('wins', 0)}-{pitcher_record.get('losses', 0)}" if pitcher_record else None,
+            "opp_record": f"{opp_record.get('wins', 0)}-{opp_record.get('losses', 0)}" if opp_record else None,
+            "opp_win_pct": opp_record.get("pct"),
             "score": rec.score,
             "breakdown": rec.score_breakdown,
         })
@@ -139,6 +151,7 @@ async def api_sp_picker():
         "total_free_agents": len(free_agents),
         "total_with_starts": len(recs),
         "has_odds": bool(odds_list),
+        "has_records": bool(records),
     }
 
 

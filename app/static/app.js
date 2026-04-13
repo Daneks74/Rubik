@@ -12,8 +12,6 @@ const state = {
   faStatView: 'current',
   selectedTeam: null,
   projSource: 'ESPN',
-  sortCol: null,
-  sortDir: 'desc',
 };
 
 // ── API helpers ──
@@ -22,9 +20,7 @@ async function api(url) {
   const resp = await fetch(url);
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    if (body.setup_required) {
-      throw new Error('SETUP_REQUIRED');
-    }
+    if (body.setup_required) throw new Error('SETUP_REQUIRED');
     throw new Error(body.error || `API error: ${resp.status}`);
   }
   return resp.json();
@@ -39,8 +35,6 @@ async function apiPost(url) {
 
 function navigate(page) {
   state.currentPage = page;
-  state.sortCol = null;
-  state.sortDir = 'desc';
   document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.toggle('active', el.dataset.page === page);
   });
@@ -62,19 +56,18 @@ async function renderPage() {
     }
   } catch (err) {
     if (err.message === 'SETUP_REQUIRED') {
-      content.innerHTML = `<div class="empty-state" style="max-width:560px;margin:80px auto;text-align:left">
-        <h2 style="color:var(--accent);margin-bottom:16px">Setup Required</h2>
-        <p style="margin-bottom:16px">To connect to your ESPN Fantasy league, create a <code>.env</code> file in the project root:</p>
-        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:monospace;font-size:13px;margin-bottom:16px;line-height:1.8">
+      content.innerHTML = `<div class="empty-state" style="max-width:560px;margin:40px auto;text-align:left;padding:20px">
+        <h2 style="color:var(--accent);margin-bottom:16px;font-size:20px">Setup Required</h2>
+        <p style="margin-bottom:16px;font-size:14px">Create a <code>.env</code> file in the project root:</p>
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:monospace;font-size:12px;margin-bottom:16px;line-height:2;overflow-x:auto">
           ESPN_LEAGUE_ID=<span style="color:var(--accent)">your_league_id</span><br>
           ESPN_S2=<span style="color:var(--accent)">your_espn_s2_cookie</span><br>
           ESPN_SWID=<span style="color:var(--accent)">{your_swid_cookie}</span><br>
-          SEASON_YEAR=2026<br>
-          ODDS_API_KEY=<span style="color:var(--accent)">your_odds_api_key</span>
+          SEASON_YEAR=2026
         </div>
-        <p style="color:var(--text-secondary);font-size:13px"><strong>ESPN cookies:</strong> Open ESPN Fantasy in Chrome → F12 → Application → Cookies → espn.com → copy <code>espn_s2</code> and <code>SWID</code></p>
-        <p style="color:var(--text-secondary);font-size:13px;margin-top:8px"><strong>Odds API:</strong> Get a free key at <code>the-odds-api.com</code></p>
-        <p style="color:var(--text-secondary);font-size:13px;margin-top:16px">After creating <code>.env</code>, restart the server and refresh this page.</p>
+        <p style="color:var(--text-secondary);font-size:13px"><strong>How to get ESPN cookies:</strong><br>Open ESPN Fantasy in your browser &rarr; F12 &rarr; Application &rarr; Cookies &rarr; espn.com &rarr; copy <code>espn_s2</code> and <code>SWID</code></p>
+        <p style="color:var(--text-muted);font-size:12px;margin-top:12px">Vegas lines are optional. Add <code>ODDS_API_KEY</code> later if you want them.</p>
+        <p style="color:var(--text-secondary);font-size:13px;margin-top:16px">Then restart the server and refresh.</p>
       </div>`;
     } else {
       content.innerHTML = `<div class="empty-state"><p style="color:var(--red)">Error loading data</p><p style="font-size:12px;margin-top:8px;color:var(--text-secondary)">${err.message}</p></div>`;
@@ -90,17 +83,18 @@ async function renderSPPicker(el) {
   const data = state.spData;
   const dates = Object.keys(data.dates).sort();
   const today = new Date().toISOString().split('T')[0];
+  const tmrw = nextDay(today);
 
   let html = `
     <div class="page-header">
-      <h2>Starting Pitcher Picker</h2>
-      <p>Free agent SPs with scheduled starts over the next 7 days, scored by projections${data.has_odds ? ' & Vegas lines' : ''}</p>
+      <h2>SP Picker</h2>
+      <p>Free agent starters — next 7 days</p>
     </div>
     <div class="summary-row">
       <div class="summary-card"><div class="label">Free Agent SPs</div><div class="value accent">${data.total_free_agents}</div></div>
       <div class="summary-card"><div class="label">With Starts</div><div class="value green">${data.total_with_starts}</div></div>
-      <div class="summary-card"><div class="label">Days Covered</div><div class="value">${dates.length}</div></div>
-      <div class="summary-card"><div class="label">Vegas Lines</div><div class="value">${data.has_odds ? 'Yes' : 'No'}</div></div>
+      <div class="summary-card"><div class="label">Days</div><div class="value">${dates.length}</div></div>
+      <div class="summary-card"><div class="label">Data</div><div class="value" style="font-size:14px">${data.has_odds ? 'Vegas + Records' : data.has_records ? 'Team Records' : 'Projections'}</div></div>
     </div>`;
 
   if (dates.length === 0) {
@@ -112,41 +106,59 @@ async function renderSPPicker(el) {
   for (const d of dates) {
     const pitchers = data.dates[d];
     const dateObj = new Date(d + 'T12:00:00');
-    const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-    let labelClass = 'day-future';
-    let labelText = '';
+    const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    let labelClass = 'day-future', labelText = '';
     if (d === today) { labelClass = 'day-today'; labelText = 'Today'; }
-    else if (dates.indexOf(d) === 0 || d === nextDay(today)) { labelClass = 'day-tomorrow'; labelText = 'Tomorrow'; }
+    else if (d === tmrw) { labelClass = 'day-tomorrow'; labelText = 'Tomorrow'; }
 
     html += `<div class="day-section"><div class="day-header"><h3>${dayName}</h3>`;
     if (labelText) html += `<span class="day-label ${labelClass}">${labelText}</span>`;
-    html += `<span style="color:var(--text-muted);font-size:12px">${pitchers.length} pitcher${pitchers.length !== 1 ? 's' : ''}</span></div>`;
+    html += `<span style="color:var(--text-muted);font-size:12px">${pitchers.length}</span></div>`;
 
-    html += `<div class="table-wrap"><table>
+    // Desktop table
+    html += `<div class="table-wrap sp-table"><table>
       <thead><tr>
-        <th>#</th><th>Pitcher</th><th>Matchup</th><th>Proj Pts</th><th>Own%</th>
-        ${data.has_odds ? '<th>ML</th><th>Win%</th><th>O/U</th>' : ''}
-        <th>Score</th>
-      </tr></thead><tbody>`;
+        <th>#</th><th>Pitcher</th><th>Matchup</th><th>Proj</th><th>Own%</th>`;
+    if (data.has_odds) html += '<th>ML</th><th>O/U</th>';
+    html += '<th>Opp Rec</th><th>Score</th></tr></thead><tbody>';
 
     pitchers.forEach((p, i) => {
-      const scoreClass = p.score >= 65 ? 'score-hot' : p.score >= 45 ? 'score-warm' : 'score-cold';
-      const matchup = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
+      const sc = p.score >= 65 ? 'score-hot' : p.score >= 45 ? 'score-warm' : 'score-cold';
+      const mu = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
       html += `<tr>
         <td>${i + 1}</td>
         <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span></td>
-        <td>${matchup}</td>
+        <td>${mu}</td>
         <td>${p.projected_pts || '—'}</td>
-        <td>${p.pct_owned}%</td>
-        ${data.has_odds ? `
-          <td>${fmtML(p.moneyline)}</td>
-          <td>${p.win_prob ? p.win_prob + '%' : '—'}</td>
-          <td>${p.over_under || '—'}</td>
-        ` : ''}
-        <td><span class="score-badge ${scoreClass}">${p.score}</span></td>
-      </tr>`;
+        <td>${p.pct_owned}%</td>`;
+      if (data.has_odds) html += `<td>${fmtML(p.moneyline)}</td><td>${p.over_under || '—'}</td>`;
+      html += `<td>${p.opp_record || '—'}</td>
+        <td><span class="score-badge ${sc}">${p.score}</span></td></tr>`;
     });
-    html += '</tbody></table></div></div>';
+    html += '</tbody></table></div>';
+
+    // Mobile cards
+    html += '<div class="pitcher-cards">';
+    pitchers.forEach((p, i) => {
+      const sc = p.score >= 65 ? 'score-hot' : p.score >= 45 ? 'score-warm' : 'score-cold';
+      const mu = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
+      html += `<div class="pitcher-card">
+        <div class="pitcher-card-left">
+          <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">${p.team}</span></div>
+          <div class="pc-meta">${mu}${p.opp_record ? ' (' + p.opp_record + ')' : ''}</div>
+          <div class="pc-details">
+            <span>Proj: ${p.projected_pts || '—'}</span>
+            <span>Own: ${p.pct_owned}%</span>
+            ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
+            ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
+          </div>
+        </div>
+        <div class="pitcher-card-right">
+          <span class="score-badge ${sc}" style="font-size:16px;padding:6px 14px">${p.score}</span>
+        </div>
+      </div>`;
+    });
+    html += '</div></div>';
   }
 
   el.innerHTML = html;
@@ -164,8 +176,8 @@ async function renderRankings(el) {
 
   let html = `
     <div class="page-header">
-      <h2>League Rankings</h2>
-      <p>Teams ranked by stat categories — ${state.rankingsMode === 'current' ? 'current season stats' : 'projected stats'}</p>
+      <h2>Rankings</h2>
+      <p>${state.rankingsMode === 'current' ? 'Current season' : 'Projected'} stats</p>
     </div>
     <div class="controls">
       <div class="control-group">
@@ -177,16 +189,15 @@ async function renderRankings(el) {
       </div>
     </div>`;
 
-  // Overall rankings table
-  html += '<h3 style="margin-bottom:12px;font-size:15px;font-weight:600">Overall Rankings</h3>';
+  html += '<h3 style="margin-bottom:12px;font-size:15px;font-weight:600">Overall</h3>';
   html += buildRankingsTable(data.teams, cats, source, 'all');
 
   if (offCats.length > 0) {
-    html += '<h3 style="margin:28px 0 12px;font-size:15px;font-weight:600">Offensive Categories</h3>';
+    html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Offense</h3>';
     html += buildRankingsTable(data.teams, offCats, source, 'offense');
   }
   if (pitCats.length > 0) {
-    html += '<h3 style="margin:28px 0 12px;font-size:15px;font-weight:600">Pitching Categories</h3>';
+    html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Pitching</h3>';
     html += buildRankingsTable(data.teams, pitCats, source, 'pitching');
   }
 
@@ -195,15 +206,11 @@ async function renderRankings(el) {
 
 function buildRankingsTable(teams, cats, source, section) {
   let html = `<div class="table-wrap"><table>
-    <thead><tr>
-      <th>Rank</th><th>Team</th>`;
-  for (const c of cats) {
-    html += `<th title="${c.display_name || c.name}">${c.name}</th>`;
-  }
+    <thead><tr><th>Rank</th><th>Team</th>`;
+  for (const c of cats) html += `<th title="${c.display_name || c.name}">${c.name}</th>`;
   if (section === 'all') html += '<th>Total</th>';
   html += '</tr></thead><tbody>';
 
-  // Sort teams by rank sum for this section
   const sorted = [...teams].sort((a, b) => {
     if (section === 'all') return a.overall_rank - b.overall_rank;
     const sumA = cats.reduce((s, c) => s + (a.ranks?.[c.name] || 99), 0);
@@ -212,18 +219,16 @@ function buildRankingsTable(teams, cats, source, section) {
   });
 
   sorted.forEach((t, idx) => {
-    const rankCls = idx === 0 ? 'rank-1' : idx === 1 ? 'rank-2' : idx === 2 ? 'rank-3' : 'rank-default';
-    html += `<tr><td><span class="rank-badge ${rankCls}">${idx + 1}</span></td>
+    const rc = idx === 0 ? 'rank-1' : idx === 1 ? 'rank-2' : idx === 2 ? 'rank-3' : 'rank-default';
+    html += `<tr><td><span class="rank-badge ${rc}">${idx + 1}</span></td>
       <td><span class="player-name">${t.team_name}</span></td>`;
     for (const c of cats) {
       const val = t[source]?.[c.name];
       const rank = t.ranks?.[c.name] || '—';
-      const rClass = rank <= 3 ? 'grade-elite' : rank <= 6 ? 'grade-good' : rank <= 9 ? 'grade-avg' : 'grade-poor';
-      html += `<td><span class="${rClass}">${fmtStat(val, c.name)}</span> <span style="font-size:10px;color:var(--text-muted)">#${rank}</span></td>`;
+      const gc = rank <= 3 ? 'grade-elite' : rank <= 6 ? 'grade-good' : rank <= 9 ? 'grade-avg' : 'grade-poor';
+      html += `<td><span class="${gc}">${fmtStat(val, c.name)}</span> <span style="font-size:10px;color:var(--text-muted)">#${rank}</span></td>`;
     }
-    if (section === 'all') {
-      html += `<td>${t.total_rank_score}</td>`;
-    }
+    if (section === 'all') html += `<td>${t.total_rank_score}</td>`;
     html += '</tr>';
   });
 
@@ -242,11 +247,10 @@ async function renderMyRoster(el) {
   if (!state.selectedTeam) {
     const data = await api('/api/my-roster');
     if (data.needs_selection) {
-      let html = `<div class="page-header"><h2>My Roster</h2><p>Select your team to review your roster</p></div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">`;
+      let html = `<div class="page-header"><h2>My Roster</h2><p>Select your team</p></div><div class="team-grid">`;
       for (const t of data.teams) {
-        html += `<div class="summary-card" style="cursor:pointer" onclick="selectTeam('${t.name.replace(/'/g, "\\'")}')">
-          <div class="label">Team</div><div class="value" style="font-size:16px">${t.name}</div></div>`;
+        html += `<div class="team-select-card" onclick="selectTeam('${t.name.replace(/'/g, "\\'")}')">
+          <div class="label">Team</div><div class="tname">${t.name}</div></div>`;
       }
       html += '</div>';
       el.innerHTML = html;
@@ -263,7 +267,6 @@ async function renderMyRoster(el) {
   const sources = ['ESPN', ...Array.from(projSources).filter(s => s !== 'ESPN')];
   if (!sources.includes(state.projSource)) state.projSource = sources[0] || 'ESPN';
 
-  // Split by position type
   const hitters = players.filter(p => !['SP', 'RP', 'P'].includes(p.position));
   const pitchers = players.filter(p => ['SP', 'RP', 'P'].includes(p.position));
   const offCats = cats.filter(c => c.type === 'offense');
@@ -272,55 +275,52 @@ async function renderMyRoster(el) {
   let html = `
     <div class="page-header">
       <h2>${data.team_name}</h2>
-      <p>Player-by-player performance review — color coded by league percentile</p>
+      <p>Color coded by league percentile</p>
     </div>
     <div class="controls">
       <div class="control-group">
-        <label>Projections</label>
+        <label>Proj</label>
         <div class="pill-group">
           ${sources.map(s => `<button class="pill ${state.projSource === s ? 'active' : ''}" onclick="setProjSource('${s}')">${s}</button>`).join('')}
         </div>
       </div>
-      <button class="refresh-btn" onclick="selectTeam(null)" style="width:auto;padding:6px 14px">Change Team</button>
+      <button class="refresh-btn" onclick="selectTeam(null)" style="width:auto;padding:6px 12px;font-size:11px">Change</button>
     </div>`;
 
   if (hitters.length > 0) {
     html += '<h3 style="margin-bottom:12px;font-size:15px;font-weight:600">Hitters</h3>';
-    html += buildRosterTable(hitters, offCats, sources);
+    html += buildRosterTable(hitters, offCats);
   }
   if (pitchers.length > 0) {
-    html += '<h3 style="margin:28px 0 12px;font-size:15px;font-weight:600">Pitchers</h3>';
-    html += buildRosterTable(pitchers, pitCats, sources);
+    html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Pitchers</h3>';
+    html += buildRosterTable(pitchers, pitCats);
   }
 
   el.innerHTML = html;
 }
 
-function buildRosterTable(players, cats, sources) {
+function buildRosterTable(players, cats) {
   let html = `<div class="table-wrap"><table>
     <thead><tr><th>Player</th><th>Pos</th><th>Pts</th>`;
   for (const c of cats) html += `<th>${c.name}</th>`;
-  html += '<th>Proj Pts</th></tr></thead><tbody>';
+  html += '</tr></thead><tbody>';
 
   for (const p of players) {
-    const injBadge = p.injury_status !== 'ACTIVE'
-      ? `<span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace('_', ' ')}</span>` : '';
+    const inj = p.injury_status !== 'ACTIVE'
+      ? `<span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
 
-    html += `<tr><td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span> ${injBadge}</td>
+    html += `<tr><td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span> ${inj}</td>
       <td><span class="player-pos">${p.position}</span></td>
       <td>${p.total_points}</td>`;
 
     for (const c of cats) {
       const val = p.current_stats?.[c.name];
       const grade = p.grades?.[c.name] || 'avg';
-      // Show projected value from selected source if available
       const proj = p.projections?.[state.projSource]?.[c.name];
       const projStr = proj !== undefined ? `<span style="font-size:10px;color:var(--text-muted)"> (${fmtStat(proj, c.name)})</span>` : '';
       html += `<td><span class="grade-${grade}">${fmtStat(val, c.name)}</span>${projStr}</td>`;
     }
-
-    const projPts = p.projections?.[state.projSource]?.['total_points'] || p.projected_points || '—';
-    html += `<td>${projPts}</td></tr>`;
+    html += '</tr>';
   }
 
   html += '</tbody></table></div>';
@@ -347,11 +347,9 @@ async function renderFreeAgents(el) {
   const cats = data.categories || [];
   const players = data.players || [];
 
-  // Determine which cats to show based on position filter
   let displayCats = cats;
   if (state.faPosition) {
-    const pitPositions = ['SP', 'RP', 'P'];
-    if (pitPositions.includes(state.faPosition)) {
+    if (['SP', 'RP', 'P'].includes(state.faPosition)) {
       displayCats = cats.filter(c => c.type === 'pitching');
     } else {
       displayCats = cats.filter(c => c.type === 'offense');
@@ -365,22 +363,16 @@ async function renderFreeAgents(el) {
   let html = `
     <div class="page-header">
       <h2>Free Agents</h2>
-      <p>Best available players — ${data.stat_view === 'current' ? 'current stats' : 'projected stats'}</p>
+      <p>${data.stat_view === 'current' ? 'Current' : 'Projected'} stats</p>
     </div>
     <div class="controls">
       <div class="control-group">
-        <label>Position</label>
+        <label>Pos</label>
         <select class="control-select" onchange="setFAPosition(this.value)">
           <option value="">All</option>
-          <option value="C" ${state.faPosition === 'C' ? 'selected' : ''}>C</option>
-          <option value="1B" ${state.faPosition === '1B' ? 'selected' : ''}>1B</option>
-          <option value="2B" ${state.faPosition === '2B' ? 'selected' : ''}>2B</option>
-          <option value="3B" ${state.faPosition === '3B' ? 'selected' : ''}>3B</option>
-          <option value="SS" ${state.faPosition === 'SS' ? 'selected' : ''}>SS</option>
-          <option value="OF" ${state.faPosition === 'OF' ? 'selected' : ''}>OF</option>
-          <option value="DH" ${state.faPosition === 'DH' ? 'selected' : ''}>DH</option>
-          <option value="SP" ${state.faPosition === 'SP' ? 'selected' : ''}>SP</option>
-          <option value="RP" ${state.faPosition === 'RP' ? 'selected' : ''}>RP</option>
+          ${['C','1B','2B','3B','SS','OF','DH','SP','RP'].map(p =>
+            `<option value="${p}" ${state.faPosition === p ? 'selected' : ''}>${p}</option>`
+          ).join('')}
         </select>
       </div>
       <div class="control-group">
@@ -399,37 +391,34 @@ async function renderFreeAgents(el) {
     </div>`;
 
   if (players.length === 0) {
-    html += '<div class="empty-state"><p>No free agents found for this filter.</p></div>';
+    html += '<div class="empty-state"><p>No free agents found.</p></div>';
     el.innerHTML = html;
     return;
   }
 
   html += `<div class="table-wrap"><table>
-    <thead><tr>
-      <th>Player</th><th>Pos</th><th>Team</th><th>Own%</th><th>Pts</th>`;
+    <thead><tr><th>Player</th><th>Pos</th><th>Team</th><th>Own%</th><th>Pts</th>`;
   for (const c of displayCats) html += `<th>${c.name}</th>`;
   html += '</tr></thead><tbody>';
 
   for (const p of players) {
-    const injBadge = p.injury_status !== 'ACTIVE'
-      ? ` <span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace('_', ' ')}</span>` : '';
+    const inj = p.injury_status !== 'ACTIVE'
+      ? ` <span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
 
-    // If showing projected and a source is selected, use that source's projections
     let displayStats = p.stats;
     if (state.faStatView === 'projected' && state.projSource !== 'ESPN' && p.projections?.[state.projSource]) {
       displayStats = p.projections[state.projSource];
     }
 
     html += `<tr>
-      <td><span class="player-name">${p.name}</span>${injBadge}</td>
+      <td><span class="player-name">${p.name}</span>${inj}</td>
       <td><span class="player-pos">${p.position}</span></td>
       <td>${p.team}</td>
       <td>${p.pct_owned}%</td>
       <td>${state.faStatView === 'projected' ? p.projected_points : p.total_points}</td>`;
 
     for (const c of displayCats) {
-      const val = displayStats?.[c.name];
-      html += `<td>${fmtStat(val, c.name)}</td>`;
+      html += `<td>${fmtStat(displayStats?.[c.name], c.name)}</td>`;
     }
     html += '</tr>';
   }
@@ -480,7 +469,7 @@ function nextDay(dateStr) {
 }
 
 async function refreshData() {
-  const btn = document.querySelector('.refresh-btn');
+  const btn = event?.target || document.querySelector('.sidebar-footer .refresh-btn');
   if (btn) btn.textContent = 'Refreshing...';
   try {
     await apiPost('/api/refresh-espn');
@@ -498,7 +487,6 @@ async function refreshData() {
 // ── Init ──
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Load league info
   try {
     state.leagueInfo = await api('/api/league');
     const nameEl = document.getElementById('league-name');
@@ -507,7 +495,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Failed to load league info:', e);
   }
 
-  // Set up nav
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => navigate(item.dataset.page));
   });
