@@ -290,12 +290,16 @@ async def api_rankings(mode: str = Query("current", enum=["current", "projected"
                 proj_breakdown = period_data.get("projected_breakdown", {})
 
                 for sid_str, val in breakdown.items():
+                    if isinstance(sid_str, str) and not sid_str.isdigit():
+                        continue
                     sid = int(sid_str) if isinstance(sid_str, str) else sid_str
                     sname = STAT_ID_MAP.get(sid, "")
                     if sname in cat_names:
                         team_stats[sname] = team_stats.get(sname, 0) + val
 
                 for sid_str, val in proj_breakdown.items():
+                    if isinstance(sid_str, str) and not sid_str.isdigit():
+                        continue
                     sid = int(sid_str) if isinstance(sid_str, str) else sid_str
                     sname = STAT_ID_MAP.get(sid, "")
                     if sname in cat_names:

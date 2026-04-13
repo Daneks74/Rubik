@@ -132,6 +132,8 @@ class ESPNClient:
                         # Use total stats (period '002026' or similar for season)
                         breakdown = period_stats.get("breakdown", {})
                         for stat_id_str, value in breakdown.items():
+                            if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
+                                continue
                             stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
                             stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
                             if stat_name not in team_stats:
@@ -197,11 +199,15 @@ class ESPNClient:
 
                 # Map stat IDs to names
                 for stat_id_str, value in breakdown.items():
+                    if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
+                        continue
                     stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
                     stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
                     current_stats[stat_name] = value
 
                 for stat_id_str, value in proj_breakdown.items():
+                    if isinstance(stat_id_str, str) and not stat_id_str.isdigit():
+                        continue
                     stat_id = int(stat_id_str) if isinstance(stat_id_str, str) else stat_id_str
                     stat_name = STAT_ID_MAP.get(stat_id, f"STAT_{stat_id}")
                     projected_stats[stat_name] = value
