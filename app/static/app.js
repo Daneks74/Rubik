@@ -282,10 +282,23 @@ async function renderMyRoster(el) {
   const sources = ['ESPN', ...Array.from(projSources).filter(s => s !== 'ESPN')];
   if (!sources.includes(state.projSource)) state.projSource = sources[0] || 'ESPN';
 
-  const hitters = players.filter(p => !['SP', 'RP', 'P'].includes(p.position));
-  const pitchers = players.filter(p => ['SP', 'RP', 'P'].includes(p.position));
   const offCats = cats.filter(c => c.type === 'offense');
   const pitCats = cats.filter(c => c.type === 'pitching');
+
+  // Group players by lineup slot into sections
+  const ilPlayers = players.filter(p => p.lineup_slot === 'IL');
+  const benchHitters = players.filter(p => p.lineup_slot === 'BE' && !isPitcherPos(p.position));
+  const benchPitchers = players.filter(p => p.lineup_slot === 'BE' && isPitcherPos(p.position));
+  const activeHitters = players.filter(p => p.lineup_slot !== 'IL' && p.lineup_slot !== 'BE' && !isPitcherPos(p.lineup_slot));
+  const activePitchers = players.filter(p => p.lineup_slot !== 'IL' && p.lineup_slot !== 'BE' && isPitcherPos(p.lineup_slot));
+
+  // Sort active hitters by slot order
+  const hitterSlotOrder = ['C', '1B', '2B', 'SS', '3B', '1B/3B', '2B/SS', 'IF', 'LF', 'CF', 'RF', 'OF', 'DH', 'UTIL'];
+  activeHitters.sort((a, b) => {
+    const ai = hitterSlotOrder.indexOf(a.lineup_slot);
+    const bi = hitterSlotOrder.indexOf(b.lineup_slot);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
 
   let html = `
     <div class="page-header">
@@ -302,30 +315,49 @@ async function renderMyRoster(el) {
       <button class="refresh-btn" onclick="selectTeam(null)" style="width:auto;padding:6px 12px;font-size:11px">Change</button>
     </div>`;
 
-  if (hitters.length > 0) {
+  if (activeHitters.length > 0) {
     html += '<h3 style="margin-bottom:12px;font-size:15px;font-weight:600">Hitters</h3>';
-    html += buildRosterTable(hitters, offCats);
+    html += buildRosterTable(activeHitters, offCats);
   }
-  if (pitchers.length > 0) {
+  if (activePitchers.length > 0) {
     html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Pitchers</h3>';
-    html += buildRosterTable(pitchers, pitCats);
+    html += buildRosterTable(activePitchers, pitCats);
+  }
+  if (benchHitters.length > 0 || benchPitchers.length > 0) {
+    html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600">Bench</h3>';
+    const benchAll = [...benchHitters, ...benchPitchers];
+    const benchCats = benchHitters.length > benchPitchers.length ? offCats : pitCats;
+    html += buildRosterTable(benchAll, benchCats);
+  }
+  if (ilPlayers.length > 0) {
+    html += '<h3 style="margin:24px 0 12px;font-size:15px;font-weight:600;color:var(--red)">Injured List</h3>';
+    const ilHitters = ilPlayers.filter(p => !isPitcherPos(p.position));
+    const ilPitchersList = ilPlayers.filter(p => isPitcherPos(p.position));
+    const ilCats = ilHitters.length >= ilPitchersList.length ? offCats : pitCats;
+    html += buildRosterTable(ilPlayers, ilCats);
   }
 
   el.innerHTML = html;
 }
 
+function isPitcherPos(pos) {
+  return ['SP', 'RP', 'P'].includes(pos);
+}
+
 function buildRosterTable(players, cats) {
   let html = `<div class="table-wrap"><table>
-    <thead><tr><th>Player</th><th>Pos</th><th>Pts</th>`;
-  for (const c of cats) html += `<th>${c.name}</th>`;
+    <thead><tr><th>Slot</th><th>Player</th><th>Pts</th>`;
+  for (const c of cats) html += `<th title="${c.display_name || c.name}">${c.display_name || c.name}</th>`;
   html += '</tr></thead><tbody>';
 
   for (const p of players) {
     const inj = p.injury_status !== 'ACTIVE'
       ? `<span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
 
-    html += `<tr><td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span> ${inj}</td>
-      <td><span class="player-pos">${p.position}</span></td>
+    const slot = p.lineup_slot || p.position;
+    html += `<tr>
+      <td><span class="player-pos">${slot}</span></td>
+      <td><span class="player-name">${p.name}</span><span class="player-team">${p.team} · ${p.position}</span> ${inj}</td>
       <td>${p.total_points}</td>`;
 
     for (const c of cats) {

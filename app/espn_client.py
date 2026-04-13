@@ -203,18 +203,24 @@ class ESPNClient:
 
     def _extract_player_info(self, player) -> PlayerInfo:
         """Convert ESPN player object to PlayerInfo."""
-        # Get eligible positions
+        # Get eligible positions (already strings in current espn-api)
         eligible = []
         if hasattr(player, 'eligibleSlots'):
-            for slot_id in player.eligibleSlots:
-                pos = POSITION_MAP.get(slot_id)
-                if pos and pos not in ("IL", "UTIL"):
-                    eligible.append(pos)
+            for slot in player.eligibleSlots:
+                if isinstance(slot, int):
+                    slot = POSITION_MAP.get(slot, '')
+                if slot and slot not in ("IL", "BE"):
+                    eligible.append(slot)
 
         # Get primary position
         position = getattr(player, 'position', 'Unknown')
         if isinstance(position, int):
             position = POSITION_MAP.get(position, 'Unknown')
+
+        # Get lineup slot (the actual roster position: C, 1B, IF, BE, IL, P, etc.)
+        lineup_slot = getattr(player, 'lineupSlot', '')
+        if isinstance(lineup_slot, int):
+            lineup_slot = POSITION_MAP.get(lineup_slot, '')
 
         # Get current and projected stats directly from breakdowns (string keys)
         current_stats = self._get_player_breakdown(player, period_key=0)
@@ -237,6 +243,7 @@ class ESPNClient:
             pro_team=pro_team,
             position=position,
             eligible_slots=eligible,
+            lineup_slot=lineup_slot,
             percent_owned=round(getattr(player, 'percent_owned', 0) or 0, 1),
             percent_started=round(getattr(player, 'percent_started', 0) or 0, 1),
             injury_status=getattr(player, 'injuryStatus', 'ACTIVE') or 'ACTIVE',

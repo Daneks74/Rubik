@@ -450,6 +450,7 @@ async def api_my_roster(team_name: str = Query(None)):
 
         player_list.append({
             "name": p.name, "position": p.position, "team": p.pro_team,
+            "lineup_slot": p.lineup_slot,
             "eligible_slots": p.eligible_slots, "injury_status": p.injury_status,
             "pct_owned": p.percent_owned,
             "current_stats": p.stats, "projected_stats": p.projected_stats,

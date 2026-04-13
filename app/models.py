@@ -11,6 +11,7 @@ class PlayerInfo:
     pro_team: str
     position: str
     eligible_slots: list[str] = field(default_factory=list)
+    lineup_slot: str = ""
     percent_owned: float = 0.0
     percent_started: float = 0.0
     injury_status: str = "ACTIVE"
