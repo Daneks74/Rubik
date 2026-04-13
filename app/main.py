@@ -487,3 +487,39 @@ async def api_refresh_espn():
     global _espn_clients
     _espn_clients = {}
     return {"status": "ok"}
+
+
+@app.get("/api/debug/team")
+async def api_debug_team():
+    """Temporary debug endpoint to inspect ESPN team data structure."""
+    espn = get_espn()
+    if not espn:
+        return {"error": "no espn"}
+    team = espn.league.teams[0]
+    result = {
+        "team_name": team.team_name,
+        "wins": team.wins,
+        "losses": team.losses,
+        "ties": getattr(team, 'ties', 0),
+        "standing": team.standing,
+        "attrs": [a for a in dir(team) if not a.startswith('_')],
+    }
+    # Check for team-level stats
+    for attr in ['stats', 'stats_2025', 'team_stats', 'cumulative_score']:
+        val = getattr(team, attr, 'NOT_FOUND')
+        if val != 'NOT_FOUND':
+            result[f'team.{attr}'] = str(val)[:500]
+
+    # Check first player's stats structure
+    if team.roster:
+        p = team.roster[0]
+        result["player0_name"] = p.name
+        result["player0_stats_keys"] = list(p.stats.keys()) if hasattr(p, 'stats') and p.stats else []
+        if p.stats:
+            first_key = list(p.stats.keys())[0]
+            period = p.stats[first_key]
+            result["player0_first_period_key"] = first_key
+            result["player0_first_period_keys"] = list(period.keys()) if isinstance(period, dict) else str(type(period))
+            bd = period.get("breakdown", {})
+            result["player0_breakdown_sample"] = dict(list(bd.items())[:10]) if bd else "empty"
+    return result
