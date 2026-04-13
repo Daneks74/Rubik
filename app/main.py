@@ -535,7 +535,7 @@ async def api_debug_team():
 
     # Get league stat categories
     cats = espn.get_stat_categories()
-    cat_info = [{"id": c["id"], "name": c["name"], "display": c.get("display_name")} for c in cats]
+    cat_info = [{"name": c["name"], "display": c.get("display_name"), "type": c.get("type")} for c in cats]
 
     # Inspect league settings object fully
     settings = espn.league.settings
