@@ -11,6 +11,7 @@ const state = {
   rosterData: null,
   freeAgentsData: null,
   rankingsMode: 'current',
+  faPlayerType: null,
   faPosition: null,
   faStatView: 'current',
   selectedTeam: null,
@@ -461,19 +462,21 @@ function setProjSource(source) {
 // ── Free Agents ──
 
 async function renderFreeAgents(el) {
+  const typeParam = state.faPlayerType ? `&player_type=${state.faPlayerType}` : '';
   const posParam = state.faPosition ? `&position=${state.faPosition}` : '';
-  state.freeAgentsData = await api(`/api/free-agents?stat_view=${state.faStatView}&limit=100${posParam}`);
+  state.freeAgentsData = await api(`/api/free-agents?limit=150${typeParam}${posParam}`);
   const data = state.freeAgentsData;
   const cats = data.categories || [];
   const players = data.players || [];
 
-  let displayCats = cats;
-  if (state.faPosition) {
-    if (['SP', 'RP', 'P'].includes(state.faPosition)) {
-      displayCats = cats.filter(c => c.type === 'pitching');
-    } else {
-      displayCats = cats.filter(c => c.type === 'offense');
-    }
+  // Determine which cats to show based on filter
+  let displayCats;
+  if (state.faPlayerType === 'pitcher' || (state.faPosition && ['SP','RP','P'].includes(state.faPosition))) {
+    displayCats = cats.filter(c => c.type === 'pitching');
+  } else if (state.faPlayerType === 'batter' || (state.faPosition && !['SP','RP','P'].includes(state.faPosition))) {
+    displayCats = cats.filter(c => c.type === 'offense');
+  } else {
+    displayCats = cats;
   }
 
   const projSources = new Set();
@@ -483,31 +486,41 @@ async function renderFreeAgents(el) {
   let html = `
     <div class="page-header">
       <h2>Free Agents</h2>
-      <p>${data.stat_view === 'current' ? 'Current' : 'Projected'} stats</p>
+      <p>Players available in your league</p>
     </div>
     <div class="controls">
       <div class="control-group">
+        <label>Type</label>
+        <div class="pill-group">
+          <button class="pill ${!state.faPlayerType ? 'active' : ''}" onclick="setFAPlayerType(null)">All</button>
+          <button class="pill ${state.faPlayerType === 'batter' ? 'active' : ''}" onclick="setFAPlayerType('batter')">Batters</button>
+          <button class="pill ${state.faPlayerType === 'pitcher' ? 'active' : ''}" onclick="setFAPlayerType('pitcher')">Pitchers</button>
+        </div>
+      </div>
+      <div class="control-group">
         <label>Pos</label>
         <select class="control-select" onchange="setFAPosition(this.value)">
-          <option value="">All</option>
+          <option value="">Any</option>
           ${['C','1B','2B','3B','SS','OF','DH','SP','RP'].map(p =>
             `<option value="${p}" ${state.faPosition === p ? 'selected' : ''}>${p}</option>`
           ).join('')}
         </select>
       </div>
       <div class="control-group">
-        <label>Stats</label>
+        <label>View</label>
         <div class="pill-group">
           <button class="pill ${state.faStatView === 'current' ? 'active' : ''}" onclick="setFAStatView('current')">Current</button>
           <button class="pill ${state.faStatView === 'projected' ? 'active' : ''}" onclick="setFAStatView('projected')">Projected</button>
+          <button class="pill ${state.faStatView === 'research' ? 'active' : ''}" onclick="setFAStatView('research')">Research</button>
         </div>
       </div>
+      ${state.faStatView === 'projected' ? `
       <div class="control-group">
         <label>Source</label>
         <div class="pill-group">
           ${sources.map(s => `<button class="pill ${state.projSource === s ? 'active' : ''}" onclick="setFAProjSource('${s}')">${s}</button>`).join('')}
         </div>
-      </div>
+      </div>` : ''}
     </div>`;
 
   if (players.length === 0) {
@@ -516,35 +529,134 @@ async function renderFreeAgents(el) {
     return;
   }
 
-  html += `<div class="table-wrap"><table>
-    <thead><tr><th>Player</th><th>Pos</th><th>Team</th><th>Own%</th><th>Pts</th>`;
-  for (const c of displayCats) html += `<th>${c.name}</th>`;
+  if (state.faStatView === 'research') {
+    html += buildFAResearchTable(players);
+  } else {
+    html += buildFAStatsTable(players, displayCats);
+  }
+
+  el.innerHTML = html;
+}
+
+function buildFAStatsTable(players, cats) {
+  const isProj = state.faStatView === 'projected';
+  let html = `<div class="table-wrap"><table data-table="fa">
+    <thead><tr>
+      <th onclick="sortFATable('name')">Player</th>
+      <th onclick="sortFATable('pos')">Pos</th>
+      <th onclick="sortFATable('vbr')" title="Value Based Ranking">${isProj ? 'pVBR' : 'VBR'}</th>
+      <th onclick="sortFATable('own')">Own%</th>`;
+  for (const c of cats) {
+    const label = c.display_name || c.name;
+    html += `<th onclick="sortFATable('${c.name}')" title="${label}">${label}</th>`;
+  }
   html += '</tr></thead><tbody>';
 
   for (const p of players) {
     const inj = p.injury_status !== 'ACTIVE'
       ? ` <span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
 
-    let displayStats = p.stats;
-    if (state.faStatView === 'projected' && state.projSource !== 'ESPN' && p.projections?.[state.projSource]) {
+    const vbr = isProj ? p.proj_vbr : p.vbr;
+    const upgradeClass = p.is_upgrade ? ' fa-upgrade' : '';
+    const color = posColor(p.position);
+
+    let displayStats = isProj ? (p.projected_stats || {}) : (p.current_stats || {});
+    if (isProj && state.projSource !== 'ESPN' && p.projections?.[state.projSource]) {
       displayStats = p.projections[state.projSource];
     }
 
-    html += `<tr>
-      <td><span class="player-name">${p.name}</span>${inj}</td>
-      <td><span class="player-pos">${p.position}</span></td>
-      <td>${p.team}</td>
-      <td>${p.pct_owned}%</td>
-      <td>${state.faStatView === 'projected' ? p.projected_points : p.total_points}</td>`;
+    html += `<tr class="${upgradeClass}">
+      <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span>${inj}${p.is_upgrade ? ' <span class="upgrade-badge">UPGRADE</span>' : ''}</td>
+      <td><span class="pos-badge" style="background:${color}20;color:${color};border:1px solid ${color}40">${p.position}</span></td>
+      <td><span class="score-badge ${vbrBadge(vbr)}" style="font-size:11px;padding:2px 8px">${vbr > 0 ? '+' : ''}${vbr}</span></td>
+      <td>${p.pct_owned}%</td>`;
 
-    for (const c of displayCats) {
+    for (const c of cats) {
       html += `<td>${fmtStat(displayStats?.[c.name], c.name)}</td>`;
     }
     html += '</tr>';
   }
 
   html += '</tbody></table></div>';
-  el.innerHTML = html;
+  return html;
+}
+
+function buildFAResearchTable(players) {
+  let html = `<div class="table-wrap"><table data-table="fa">
+    <thead><tr>
+      <th onclick="sortFATable('name')">Player</th>
+      <th onclick="sortFATable('pos')">Pos</th>
+      <th onclick="sortFATable('vbr')">VBR</th>
+      <th onclick="sortFATable('pvbr')">pVBR</th>
+      <th onclick="sortFATable('own')">Own%</th>
+      <th onclick="sortFATable('start')">Start%</th>
+      <th onclick="sortFATable('team')">Team</th>
+      <th>Eligible</th>
+    </tr></thead><tbody>`;
+
+  for (const p of players) {
+    const inj = p.injury_status !== 'ACTIVE'
+      ? ` <span class="injury-badge ${p.injury_status === 'DAY_TO_DAY' ? 'dtd' : 'il'}">${p.injury_status.replace(/_/g, ' ')}</span>` : '';
+    const color = posColor(p.position);
+    const upgradeClass = p.is_upgrade ? ' fa-upgrade' : '';
+
+    // Ownership heat color
+    const ownPct = p.pct_owned;
+    const ownColor = ownPct >= 50 ? 'var(--green)' : ownPct >= 20 ? 'var(--yellow)' : ownPct >= 5 ? 'var(--orange)' : 'var(--text-muted)';
+
+    html += `<tr class="${upgradeClass}">
+      <td><span class="player-name">${p.name}</span>${inj}${p.is_upgrade ? ' <span class="upgrade-badge">UPGRADE</span>' : ''}</td>
+      <td><span class="pos-badge" style="background:${color}20;color:${color};border:1px solid ${color}40">${p.position}</span></td>
+      <td><span class="score-badge ${vbrBadge(p.vbr)}" style="font-size:11px;padding:2px 8px">${p.vbr > 0 ? '+' : ''}${p.vbr}</span></td>
+      <td><span class="score-badge ${vbrBadge(p.proj_vbr)}" style="font-size:11px;padding:2px 8px">${p.proj_vbr > 0 ? '+' : ''}${p.proj_vbr}</span></td>
+      <td><span style="color:${ownColor};font-weight:600">${ownPct}%</span></td>
+      <td>${p.pct_started}%</td>
+      <td>${p.team}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${(p.eligible_slots || []).filter(s => !['BE','IL','UTIL'].includes(s)).join(', ')}</td>
+    </tr>`;
+  }
+
+  html += '</tbody></table></div>';
+  return html;
+}
+
+// FA table sorting
+let faSortState = {};
+function sortFATable(key) {
+  const table = document.querySelector('table[data-table="fa"]');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+
+  const prev = faSortState.key;
+  const asc = (prev === key) ? !faSortState.asc : (key === 'name' || key === 'pos' || key === 'team');
+  faSortState = { key, asc };
+
+  const headers = Array.from(table.querySelectorAll('thead th'));
+  let colIdx = headers.findIndex(h => {
+    const oc = h.getAttribute('onclick') || '';
+    return oc.includes(`'${key}'`);
+  });
+  if (colIdx < 0) colIdx = 0;
+
+  rows.sort((a, b) => {
+    const aText = a.cells[colIdx]?.textContent?.trim() || '';
+    const bText = b.cells[colIdx]?.textContent?.trim() || '';
+    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+    if (!isNaN(aNum) && !isNaN(bNum)) {
+      return asc ? aNum - bNum : bNum - aNum;
+    }
+    return asc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+function setFAPlayerType(type) {
+  state.faPlayerType = type;
+  state.freeAgentsData = null;
+  renderPage();
 }
 
 function setFAPosition(pos) {
@@ -555,7 +667,6 @@ function setFAPosition(pos) {
 
 function setFAStatView(view) {
   state.faStatView = view;
-  state.freeAgentsData = null;
   renderPage();
 }
 

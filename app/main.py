@@ -521,32 +521,156 @@ async def api_my_roster(team_name: str = Query(None)):
 @app.get("/api/free-agents")
 async def api_free_agents(
     position: str = Query(None),
-    stat_view: str = Query("current", enum=["current", "projected"]),
-    limit: int = Query(50, ge=10, le=200),
+    player_type: str = Query(None, enum=["batter", "pitcher"]),
+    limit: int = Query(100, ge=10, le=300),
 ):
     espn = get_espn()
     if not espn:
         return JSONResponse(status_code=400, content={"error": "ESPN league not configured. Add ESPN_S2 and ESPN_SWID to enable this feature."})
 
+    import math
+
     categories = espn.get_stat_categories()
-    agents = espn.get_free_agents(size=limit, position=position)
+    cat_names = [c["name"] for c in categories]
+    inverse_cats = {c["name"] for c in categories if c.get("is_inverse")}
+    off_cats = [c["name"] for c in categories if c["type"] == "offense"]
+    pit_cats = [c["name"] for c in categories if c["type"] == "pitching"]
+
+    # Fetch free agents — filter by position if specific, otherwise get all
+    fa_position = position
+    if not fa_position and player_type == "pitcher":
+        fa_position = "SP"  # Will also get RP from a second call
+    agents = espn.get_free_agents(size=limit, position=fa_position)
+
+    # If pitcher type requested, also fetch RP
+    if not position and player_type == "pitcher":
+        rp_agents = espn.get_free_agents(size=50, position="RP")
+        seen = {p.name for p in agents}
+        for p in rp_agents:
+            if p.name not in seen:
+                agents.append(p)
+
+    # Filter by player_type if set
+    if player_type == "batter":
+        agents = [p for p in agents if p.position not in ('SP', 'RP', 'P')]
+    elif player_type == "pitcher":
+        agents = [p for p in agents if p.position in ('SP', 'RP', 'P')]
+
     all_proj = get_projections()
+
+    # Collect league-wide stats for z-score calculation
+    all_players = []
+    for team in espn.league.teams:
+        for p in team.roster:
+            all_players.append(espn._extract_player_info(p))
+
+    stat_values = {}
+    for p in all_players:
+        for stat_name, val in p.stats.items():
+            if stat_name in cat_names and isinstance(val, (int, float)):
+                if stat_name not in stat_values:
+                    stat_values[stat_name] = []
+                stat_values[stat_name].append(val)
+
+    stat_dist = {}
+    for sname, vals in stat_values.items():
+        n = len(vals)
+        if n > 1:
+            mean = sum(vals) / n
+            variance = sum((v - mean) ** 2 for v in vals) / n
+            std = math.sqrt(variance) if variance > 0 else 1.0
+            stat_dist[sname] = {"mean": mean, "std": std}
+
+    # Get user's roster for comparison
+    swid = espn.espn_swid.strip('{}')
+    my_roster_vbr = {}  # position -> worst VBR on my roster
+    for team in espn.league.teams:
+        owners = getattr(team, 'owners', [])
+        is_mine = any(swid in (o.get('id', str(o)) if isinstance(o, dict) else str(o)) for o in owners)
+        if not is_mine:
+            continue
+        for p in team.roster:
+            info = espn._extract_player_info(p)
+            if info.lineup_slot in ('IL', 'BE'):
+                continue
+            is_pit = info.position in ('SP', 'RP', 'P')
+            rcats = pit_cats if is_pit else off_cats
+            vbr = 0.0
+            for cat in rcats:
+                val = info.stats.get(cat)
+                if val is not None and isinstance(val, (int, float)) and cat in stat_dist:
+                    z = (val - stat_dist[cat]["mean"]) / stat_dist[cat]["std"]
+                    if cat in inverse_cats:
+                        z = -z
+                    vbr += z
+            # Track worst VBR per position for upgrade detection
+            pos = info.position
+            if pos not in my_roster_vbr or vbr < my_roster_vbr[pos]:
+                my_roster_vbr[pos] = round(vbr, 1)
+            # Also track by eligible slots
+            for slot in info.eligible_slots:
+                if slot not in ('BE', 'IL', 'UTIL'):
+                    if slot not in my_roster_vbr or vbr < my_roster_vbr[slot]:
+                        my_roster_vbr[slot] = round(vbr, 1)
+        break
 
     player_list = []
     for p in agents:
         projections = get_player_projections(p.name, all_proj)
         if p.projected_stats:
             projections["ESPN"] = p.projected_stats
-        stats = p.projected_stats if stat_view == "projected" else p.stats
+
+        is_pit = p.position in ('SP', 'RP', 'P')
+        rcats = pit_cats if is_pit else off_cats
+
+        # Current VBR
+        cur_vbr = 0.0
+        for cat in rcats:
+            val = p.stats.get(cat)
+            if val is not None and isinstance(val, (int, float)) and cat in stat_dist:
+                z = (val - stat_dist[cat]["mean"]) / stat_dist[cat]["std"]
+                if cat in inverse_cats:
+                    z = -z
+                cur_vbr += z
+
+        # Projected VBR
+        proj_vbr = 0.0
+        proj_stats = p.projected_stats or {}
+        for cat in rcats:
+            val = proj_stats.get(cat)
+            if val is not None and isinstance(val, (int, float)) and cat in stat_dist:
+                z = (val - stat_dist[cat]["mean"]) / stat_dist[cat]["std"]
+                if cat in inverse_cats:
+                    z = -z
+                proj_vbr += z
+
+        # Check if this FA is an upgrade over user's worst at that position
+        is_upgrade = False
+        my_worst = my_roster_vbr.get(p.position)
+        if my_worst is not None and cur_vbr > my_worst:
+            is_upgrade = True
+
         player_list.append({
             "name": p.name, "position": p.position, "team": p.pro_team,
             "eligible_slots": p.eligible_slots, "injury_status": p.injury_status,
             "pct_owned": p.percent_owned, "pct_started": p.percent_started,
-            "stats": stats, "projections": projections,
-            "total_points": p.total_points, "projected_points": p.projected_points,
+            "current_stats": p.stats, "projected_stats": p.projected_stats,
+            "projections": projections,
+            "vbr": round(cur_vbr, 1),
+            "proj_vbr": round(proj_vbr, 1),
+            "is_upgrade": is_upgrade,
         })
 
-    return {"players": player_list, "categories": categories, "position": position, "stat_view": stat_view}
+    # Sort by current VBR descending
+    player_list.sort(key=lambda x: x["vbr"], reverse=True)
+
+    return {
+        "players": player_list,
+        "categories": categories,
+        "position": position,
+        "player_type": player_type,
+        "my_roster_vbr": my_roster_vbr,
+    }
 
 
 # ──────────────────────────────────────────────
