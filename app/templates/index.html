@@ -13,15 +13,49 @@
 </head>
 <body>
   <div class="layout">
-    <!-- Sidebar (desktop) / Bottom tab bar (mobile) -->
-    <aside class="sidebar">
-      <div class="sidebar-brand">
-        <h1>Fantasy Dashboard</h1>
+    <!-- Top header bar -->
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <h1 class="top-bar-title">Fantasy Dashboard</h1>
         <div class="league-switcher" id="league-switcher" style="display:none">
           <select id="league-select" class="league-select" onchange="switchLeague(this.value)"></select>
         </div>
-        <div class="league-name" id="league-name">Loading...</div>
+        <span class="league-name" id="league-name">Loading...</span>
       </div>
+      <div class="top-bar-right">
+        <button class="refresh-btn top-refresh" onclick="refreshData()" title="Refresh data">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+        <div class="account-menu" id="account-menu">
+          <button class="account-btn" onclick="toggleAccountMenu()">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </button>
+          <div class="account-dropdown" id="account-dropdown">
+            <div class="dropdown-header" id="dropdown-user">Account</div>
+            <div class="dropdown-item" onclick="navigate('account'); toggleAccountMenu()">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              Profile
+            </div>
+            <div class="dropdown-item" onclick="navigate('settings'); toggleAccountMenu()">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              Settings
+            </div>
+            <div style="border-top:1px solid var(--border)"></div>
+            <div class="dropdown-item" onclick="refreshData(); toggleAccountMenu()">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              Refresh All Data
+            </div>
+            <div class="dropdown-item" onclick="window.location.reload()">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/></svg>
+              Reload App
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Sidebar (desktop) / Bottom tab bar (mobile) -->
+    <aside class="sidebar">
       <nav class="sidebar-nav">
         <div class="nav-item active" data-page="sp-picker">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -48,9 +82,6 @@
           <span>FA</span>
         </div>
       </nav>
-      <div class="sidebar-footer">
-        <button class="refresh-btn" onclick="refreshData()">Refresh Data</button>
-      </div>
     </aside>
 
     <!-- Main content -->

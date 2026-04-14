@@ -36,43 +36,129 @@ body {
 }
 
 /* ── Layout ── */
-.layout { display: flex; min-height: 100vh; min-height: 100dvh; }
+.layout { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
 
-/* ── Desktop sidebar ── */
-.sidebar {
-  width: 240px;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
-  padding: 24px 0;
+/* ── Top header bar ── */
+.top-bar {
   position: fixed;
-  top: 0; left: 0; bottom: 0;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-}
-
-.sidebar-brand {
-  padding: 0 20px 24px;
+  top: 0; left: 0; right: 0;
+  height: 48px;
+  background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  z-index: 150;
 }
 
-.sidebar-brand h1 {
-  font-size: 18px;
+.top-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.top-bar-title {
+  font-size: 15px;
   font-weight: 700;
   background: linear-gradient(135deg, var(--accent), #a78bfa);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   letter-spacing: -0.5px;
+  white-space: nowrap;
 }
 
-.sidebar-brand .league-name {
+.top-bar-left .league-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.top-refresh {
+  width: auto;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+}
+
+.account-menu { position: relative; }
+
+.account-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  padding: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.account-btn:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+
+.account-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  z-index: 200;
+  overflow: hidden;
+}
+.account-dropdown.open { display: block; }
+
+.dropdown-header {
+  padding: 10px 14px;
   font-size: 11px;
   color: var(--text-muted);
-  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
 }
 
-.league-switcher { margin-top: 8px; }
+.dropdown-item {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.1s;
+}
+.dropdown-item:hover { background: var(--bg-card); color: var(--text-primary); }
+
+.league-switcher { display: flex; align-items: center; }
+
+/* ── Desktop sidebar ── */
+.sidebar {
+  width: 200px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 12px 0;
+  position: fixed;
+  top: 48px; left: 0; bottom: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
 
 .league-select {
   width: 100%;
@@ -138,7 +224,8 @@ body {
 
 /* ── Main content ── */
 .main {
-  margin-left: 240px;
+  margin-left: 200px;
+  margin-top: 48px;
   flex: 1;
   padding: 32px;
   max-width: 1400px;
@@ -477,7 +564,11 @@ th[onclick]:hover { color: var(--accent); }
    Mobile: < 768px — bottom tab bar, card views
    ──────────────────────────────────────────── */
 @media (max-width: 768px) {
-  /* Hide desktop sidebar */
+  /* Top bar adjustments for mobile */
+  .top-bar { padding: 0 12px; }
+  .top-bar-title { font-size: 13px; }
+
+  /* Hide desktop sidebar, show bottom tab bar */
   .sidebar {
     position: fixed;
     top: auto;
@@ -493,33 +584,7 @@ th[onclick]:hover { color: var(--accent); }
     padding-bottom: var(--safe-bottom);
   }
 
-  .sidebar-brand {
-    display: none;
-  }
-
-  /* Mobile league bar at top of content */
-  .mobile-league-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 0;
-    margin-bottom: 8px;
-  }
-
-  .mobile-league-bar .league-select {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    color: var(--text-primary);
-    padding: 6px 24px 6px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-family: inherit;
-    -webkit-appearance: none;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239499b3' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-  }
+  .sidebar-brand { display: none; }
   .sidebar-footer { display: none; }
 
   .sidebar-nav {
@@ -546,9 +611,10 @@ th[onclick]:hover { color: var(--accent); }
   .nav-item.active { background: none; }
   .nav-item svg { width: 20px; height: 20px; }
 
-  /* Main content: full width, pad bottom for tab bar */
+  /* Main content: full width, pad top for header, pad bottom for tab bar */
   .main {
     margin-left: 0;
+    margin-top: 48px;
     padding: 16px 14px;
     padding-bottom: calc(72px + var(--safe-bottom));
   }
@@ -576,6 +642,95 @@ th[onclick]:hover { color: var(--accent); }
 
   /* Team selector: single column */
   .team-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Settings / Account mock pages ── */
+.settings-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+}
+
+.settings-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text-primary);
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.setting-row:last-child { border-bottom: none; }
+
+.setting-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.setting-label small {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.setting-value {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.toggle-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.toggle-switch.on { background: var(--accent); border-color: var(--accent); }
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle-switch.on::after { transform: translateX(18px); }
+
+.avatar-circle {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  font-weight: 700;
+  color: white;
+}
+
+.mock-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--yellow-dim);
+  color: var(--yellow);
+  margin-left: 8px;
+  vertical-align: middle;
 }
 
 /* ── Small phones: < 390px ── */

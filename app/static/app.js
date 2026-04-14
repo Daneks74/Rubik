@@ -39,6 +39,7 @@ async function apiPost(url) {
 
 function navigate(page) {
   state.currentPage = page;
+  // account/settings are not sidebar pages, deselect all nav items for those
   document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.toggle('active', el.dataset.page === page);
   });
@@ -57,6 +58,8 @@ async function renderPage() {
       case 'rankings': await renderRankings(content); break;
       case 'my-roster': await renderMyRoster(content); break;
       case 'free-agents': await renderFreeAgents(content); break;
+      case 'account': renderAccount(content); break;
+      case 'settings': renderSettings(content); break;
     }
   } catch (err) {
     if (err.message === 'SETUP_REQUIRED') {
@@ -713,6 +716,215 @@ async function refreshData() {
   } finally {
     if (btn) btn.textContent = 'Refresh Data';
   }
+}
+
+// ── Account menu ──
+
+function toggleAccountMenu() {
+  const dropdown = document.getElementById('account-dropdown');
+  if (dropdown) dropdown.classList.toggle('open');
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('account-menu');
+  const dropdown = document.getElementById('account-dropdown');
+  if (dropdown && menu && !menu.contains(e.target)) {
+    dropdown.classList.remove('open');
+  }
+});
+
+// ── Account (mock) ──
+
+function renderAccount(el) {
+  const leagueName = state.leagues.length > 0 ? state.leagues.find(l => l.id === state.activeLeagueId)?.name || 'Unknown' : 'Not connected';
+
+  el.innerHTML = `
+    <div class="page-header">
+      <h2>Profile <span class="mock-badge">Mock</span></h2>
+      <p>Account details and connected services</p>
+    </div>
+
+    <div class="settings-section">
+      <div style="display:flex;align-items:center;gap:20px;padding:8px 0">
+        <div class="avatar-circle">F</div>
+        <div>
+          <div style="font-size:18px;font-weight:700">Fantasy Manager</div>
+          <div style="font-size:13px;color:var(--text-muted);margin-top:2px">fantasy@example.com</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Connected Services</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          ESPN Fantasy
+          <small>League access via cookies</small>
+        </div>
+        <div class="setting-value" style="color:var(--green);font-weight:600">${state.hasEspn ? 'Connected' : 'Not Connected'}</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Active League
+          <small>Current league selection</small>
+        </div>
+        <div class="setting-value">${leagueName}</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Leagues Configured
+          <small>Total leagues in your config</small>
+        </div>
+        <div class="setting-value">${state.leagues.length}</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Data Sources</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          MLB Stats API
+          <small>Probable pitchers, schedules</small>
+        </div>
+        <div class="setting-value" style="color:var(--green);font-weight:600">Active</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Vegas Odds
+          <small>Moneylines, over/unders</small>
+        </div>
+        <div class="setting-value" style="color:var(--text-muted)">API Key Required</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          FanGraphs Projections
+          <small>Steamer, ZiPS, ATC</small>
+        </div>
+        <div class="setting-value" style="color:var(--text-muted)">Coming Soon</div>
+      </div>
+    </div>
+
+    <div class="settings-section" style="opacity:0.6">
+      <h3>Danger Zone</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          Clear All Cached Data
+          <small>Force refresh from ESPN</small>
+        </div>
+        <button class="refresh-btn" style="width:auto;padding:6px 16px" onclick="refreshData()">Clear Cache</button>
+      </div>
+    </div>`;
+}
+
+// ── Settings (mock) ──
+
+function renderSettings(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <h2>Settings <span class="mock-badge">Mock</span></h2>
+      <p>App preferences and configuration</p>
+    </div>
+
+    <div class="settings-section">
+      <h3>Display</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          Theme
+          <small>App color scheme</small>
+        </div>
+        <div class="setting-value">Dark</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Default Page
+          <small>Page shown on app launch</small>
+        </div>
+        <div class="setting-value">SP Picker</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Compact Tables
+          <small>Reduce row height in tables</small>
+        </div>
+        <div class="toggle-switch" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Show Projected Stats
+          <small>Display projections alongside current stats</small>
+        </div>
+        <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>SP Picker</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          Days Ahead
+          <small>Number of days to look ahead for starts</small>
+        </div>
+        <div class="setting-value">7</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Minimum Score
+          <small>Hide pitchers below this score</small>
+        </div>
+        <div class="setting-value">0</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Include Vegas Lines
+          <small>Factor moneylines into scoring</small>
+        </div>
+        <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Free Agents</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          Default View
+          <small>Stats view when opening Free Agents</small>
+        </div>
+        <div class="setting-value">Current</div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Highlight Upgrades
+          <small>Show green highlight for potential upgrades</small>
+        </div>
+        <div class="toggle-switch on" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Results Per Page
+          <small>Number of free agents to load</small>
+        </div>
+        <div class="setting-value">150</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Notifications</h3>
+      <div class="setting-row">
+        <div class="setting-label">
+          Roster Alerts
+          <small>Notify when IL-eligible players are in lineup</small>
+        </div>
+        <div class="toggle-switch" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Waiver Wire Alerts
+          <small>Notify when high-value FAs become available</small>
+        </div>
+        <div class="toggle-switch" onclick="this.classList.toggle('on')"></div>
+      </div>
+    </div>`;
 }
 
 // ── League switching ──
