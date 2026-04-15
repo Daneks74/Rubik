@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import Column, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 
 from app.db import Base
 
@@ -64,6 +64,23 @@ class DailyPitcherProjection(Base):
     stream_score = Column(Float, nullable=True)
     model_version = Column(String, nullable=True)
     generated_at = Column(DateTime, default=_utcnow)
+
+
+class TeamContext(Base):
+    __tablename__ = "team_context"
+    __table_args__ = (
+        UniqueConstraint("team_code", "season_year", name="uq_team_context_team_season"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    team_code = Column(String, nullable=False, index=True)
+    season_year = Column(Integer, nullable=False, index=True)
+    offense_strength = Column(Float, nullable=True)
+    offense_k_tendency = Column(Float, nullable=True)
+    win_support_factor = Column(Float, nullable=True)
+    bullpen_support_factor = Column(Float, nullable=True)
+    run_environment_factor = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow)
 
 
 class AppRun(Base):

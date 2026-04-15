@@ -13,6 +13,7 @@ from app.models import (
     DailyPitcherProjection,
     PitcherBaseline,
     ProbableStarter,
+    TeamContext,
 )
 from app.probable_starters import get_probable_starters
 from app.projection_builder import (
@@ -24,6 +25,7 @@ from app.projection_engine import (
     MODEL_VERSION,
     build_daily_projections_for_starters,
 )
+from app.team_context import get_default_team_context, get_team_context_map, upsert_team_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,10 +50,15 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     # 2. Get baselines (real MLB stats with per-pitcher demo fallback)
     baselines, baseline_fallback_count = get_pitcher_baselines_for_starters(starters, season_year)
 
-    # 3. Build projections using the formula engine
-    projections, _debug = build_daily_projections_for_starters(starters, baselines)
+    # 3. Load team context (auto-seeds defaults if missing)
+    team_ctx_map = get_team_context_map(db, season_year)
 
-    # 4. Clear existing rows for this date
+    # 4. Build projections using the formula engine with team context
+    projections, _debug = build_daily_projections_for_starters(
+        starters, baselines, team_ctx_map,
+    )
+
+    # 5. Clear existing rows for this date
     del_ps = db.execute(
         delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
     ).rowcount
@@ -60,7 +67,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     ).rowcount
     logger.info("Cleared %d starters, %d projections for %s", del_ps, del_dp, target_date)
 
-    # 5. Insert starters
+    # 6. Insert starters
     for s in starters:
         db.add(ProbableStarter(
             game_date=s.game_date, game_id=s.game_id,
@@ -69,10 +76,10 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
             throws=s.throws, status=s.status, source=s.source,
         ))
 
-    # 6. Upsert baselines
+    # 7. Upsert baselines
     baselines_inserted = upsert_pitcher_baselines(db, baselines, season_year)
 
-    # 7. Insert projections
+    # 8. Insert projections
     for p in projections:
         db.add(DailyPitcherProjection(
             game_date=p.game_date, game_id=p.game_id,
@@ -340,6 +347,7 @@ def db_summary():
         ps_count = db.query(func.count(ProbableStarter.id)).scalar()
         pb_count = db.query(func.count(PitcherBaseline.id)).scalar()
         dp_count = db.query(func.count(DailyPitcherProjection.id)).scalar()
+        tc_count = db.query(func.count(TeamContext.id)).scalar()
         ar_count = db.query(func.count(AppRun.id)).scalar()
 
         latest = db.query(func.max(DailyPitcherProjection.generated_at)).scalar()
@@ -348,6 +356,7 @@ def db_summary():
             "probable_starters": ps_count,
             "pitcher_baselines": pb_count,
             "daily_pitcher_projections": dp_count,
+            "team_context": tc_count,
             "app_runs": ar_count,
             "latest_projection": str(latest) if latest else None,
         }
@@ -579,11 +588,12 @@ def build_projections(
     date: Optional[str] = Query(None, description="Target date as YYYY-MM-DD, defaults to tomorrow"),
     season_year: int = Query(2026, description="Season year for baselines"),
 ):
-    """Build formula-v1 projections from stored starters and baselines.
+    """Build projections from stored starters, baselines, and team context.
 
-    Loads starters and baselines already in the DB, runs the projection engine,
-    and stores results. Use refresh-probable-starters and refresh-baselines first
-    to populate upstream data.
+    Loads starters and baselines already in the DB, loads team context
+    (auto-seeding defaults if needed), runs the projection engine,
+    and stores results. Use refresh-probable-starters and refresh-baselines
+    first to populate upstream data.
     """
     target = _parse_date(date) if date else _tomorrow()
 
@@ -628,8 +638,13 @@ def build_projections(
             for b in stored_baselines
         ]
 
-        # Run formula engine
-        projections, debug_list = build_daily_projections_for_starters(starters, baselines)
+        # Load team context (auto-seeds defaults if missing)
+        team_ctx_map = get_team_context_map(db, season_year)
+
+        # Run formula engine with team context
+        projections, debug_list = build_daily_projections_for_starters(
+            starters, baselines, team_ctx_map,
+        )
 
         # Clear existing projections for this date
         del_count = db.execute(
@@ -654,18 +669,20 @@ def build_projections(
             run_type="projection_build", status="success",
             details=f"date={target}, model={MODEL_VERSION}, "
                     f"starters={len(starters)}, baselines={len(baselines)}, "
+                    f"team_ctx={len(team_ctx_map)}, "
                     f"projections={len(projections)}, cleared={del_count}",
         ))
         db.commit()
 
-        logger.info("Built %d formula projections for %s (cleared %d old)",
-                     len(projections), target, del_count)
+        logger.info("Built %d formula projections for %s (cleared %d old, %d team contexts)",
+                     len(projections), target, del_count, len(team_ctx_map))
 
         return {
             "target_date": target.isoformat(),
             "model_version": MODEL_VERSION,
             "starters_loaded": len(starters),
             "baselines_loaded": len(baselines),
+            "team_contexts_loaded": len(team_ctx_map),
             "projections_built": len(projections),
             "cleared": del_count,
         }
@@ -739,14 +756,93 @@ def projection_debug(
             for b in stored_baselines
         ]
 
+        # Load team context (auto-seeds defaults if missing)
+        team_ctx_map = get_team_context_map(db, season_year)
+
         # Run engine (read-only — we only want the debug output)
-        projections, debug_list = build_daily_projections_for_starters(starters, baselines)
+        projections, debug_list = build_daily_projections_for_starters(
+            starters, baselines, team_ctx_map,
+        )
 
         return {
             "date": target.isoformat(),
             "model_version": MODEL_VERSION,
+            "team_contexts_loaded": len(team_ctx_map),
             "pitcher_count": len(debug_list),
             "pitchers": debug_list,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-team-context")
+def admin_refresh_team_context(
+    season_year: int = Query(2026, description="Season year"),
+):
+    """Generate or refresh lightweight default team context rows for all 30 MLB teams."""
+    db = SessionLocal()
+    try:
+        defaults = get_default_team_context(season_year)
+        count = upsert_team_context(db, defaults)
+
+        db.add(AppRun(
+            run_type="team_context_refresh", status="success",
+            details=f"season_year={season_year}, teams={count}",
+        ))
+        db.commit()
+
+        logger.info("Team context refresh: %d teams for %d", count, season_year)
+        return {
+            "season_year": season_year,
+            "teams_upserted": count,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("Team context refresh failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="team_context_refresh", status="error",
+                details=f"season_year={season_year}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/team-context")
+def admin_team_context(
+    season_year: int = Query(2026, description="Season year"),
+):
+    """Return all stored team context rows for a season, sorted by team_code."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(TeamContext)
+            .filter(TeamContext.season_year == season_year)
+            .order_by(TeamContext.team_code)
+            .all()
+        )
+
+        return {
+            "season_year": season_year,
+            "count": len(rows),
+            "teams": [
+                {
+                    "team_code": r.team_code,
+                    "offense_strength": r.offense_strength,
+                    "offense_k_tendency": r.offense_k_tendency,
+                    "win_support_factor": r.win_support_factor,
+                    "bullpen_support_factor": r.bullpen_support_factor,
+                    "run_environment_factor": r.run_environment_factor,
+                    "updated_at": str(r.updated_at) if r.updated_at else None,
+                }
+                for r in rows
+            ],
         }
     finally:
         db.close()

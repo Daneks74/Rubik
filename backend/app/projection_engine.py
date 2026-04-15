@@ -1,22 +1,22 @@
 """
 Formula-based projection engine — produces daily pitcher projections from
-stored baselines and lightweight matchup context.
+stored baselines, lightweight team context, and matchup heuristics.
 
 Designed for modularity: matchup context, projection formulas, and scoring
 are all isolated so they can be upgraded independently with opponent lineups,
 park factors, bullpen quality, and simulation later.
 
-Model version: formula-v1
+Model version: formula-v2-team-context
 """
 import logging
 from dataclasses import dataclass
-from datetime import date
 
 from app.projection_builder import BaselineRecord, ProjectionRecord, StarterRecord
+from app.team_context import NEUTRAL_TEAM_CTX
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "formula-v1"
+MODEL_VERSION = "formula-v2-team-context"
 
 # ── MLB league-average defaults for missing baseline fields ──
 # Used when a pitcher's baseline is incomplete. These are roughly
@@ -40,9 +40,9 @@ BF_PER_IP = 4.3
 
 @dataclass
 class MatchupContext:
-    """Lightweight matchup factors applied to the baseline projection.
-    All multipliers default to neutral (1.0). Future enhancements will
-    populate these from opponent lineup data, park factors, etc."""
+    """Matchup factors applied to the baseline projection.
+    Populated from team context data and home/away environment.
+    All multipliers default to neutral (1.0)."""
 
     is_home: bool
     # IP adjustment: home pitchers tend to go slightly deeper
@@ -52,32 +52,81 @@ class MatchupContext:
     opp_bb_factor: float = 1.0   # multiplier on BB rate
     opp_hit_factor: float = 1.0  # multiplier on hits allowed
     opp_era_factor: float = 1.0  # multiplier on ER
-    # Park factor: >1.0 = hitter-friendly, <1.0 = pitcher-friendly
+    # Park / run environment: >1.0 = hitter-friendly, <1.0 = pitcher-friendly
     park_factor: float = 1.0
     # Team win environment: base win rate for the pitcher's team
     team_win_rate: float = 0.500
-    # How many fields used defaults (for confidence tracking)
+    # Own-team bullpen quality: >1.0 = strong pen → better win hold
+    bullpen_factor: float = 1.0
+    # Run environment factor for blowup risk
+    run_env_factor: float = 1.0
+    # How many baseline fields used defaults (for confidence tracking)
     defaults_used: int = 0
 
 
-def build_matchup_context(starter: StarterRecord) -> MatchupContext:
-    """Build a matchup context from a starter record.
+def build_matchup_context(
+    starter: StarterRecord,
+    own_team_ctx: dict | None = None,
+    opp_team_ctx: dict | None = None,
+) -> MatchupContext:
+    """Build a matchup context from a starter record and team context.
 
-    Currently uses simple home/away adjustments and neutral defaults.
-    Future: look up opponent lineup strength, park factors, etc.
+    Uses team-level heuristics to populate opponent difficulty multipliers,
+    park/run-environment factors, and win-probability inputs.
+    Falls back to neutral (1.0) defaults when team context is unavailable.
     """
     is_home = starter.home_away == "home"
+    own = own_team_ctx or NEUTRAL_TEAM_CTX
+    opp = opp_team_ctx or NEUTRAL_TEAM_CTX
 
-    # Home pitchers go ~0.2 IP deeper on average
+    # ── IP adjustment ──
+    # Home pitchers go ~0.2 IP deeper on average.
+    # Stronger opposing offense knocks pitchers out slightly earlier.
     ip_adj = 0.2 if is_home else 0.0
+    ip_adj += (1.0 - opp["offense_strength"]) * 0.3
+    ip_adj = max(-0.3, min(0.4, ip_adj))
 
-    # Future: use starter.opponent_team to look up lineup/park data
-    # For now, everything is neutral (1.0 / 0.500)
+    # ── Opponent K factor ──
+    # Teams that strike out more are easier to K against.
+    opp_k_factor = opp["offense_k_tendency"]
+
+    # ── Opponent hit factor ──
+    # Stronger offenses produce more hits. Dampened to 50% of raw factor.
+    opp_hit_factor = 1.0 + (opp["offense_strength"] - 1.0) * 0.5
+
+    # ── Opponent ERA factor ──
+    # Stronger offenses drive more earned runs. Dampened to 60%.
+    opp_era_factor = 1.0 + (opp["offense_strength"] - 1.0) * 0.6
+
+    # ── Park / run environment ──
+    # Based on game location: pitcher's home park or opponent's park.
+    if is_home:
+        park_factor = own["run_environment_factor"]
+        run_env_factor = own["run_environment_factor"]
+    else:
+        park_factor = opp["run_environment_factor"]
+        run_env_factor = opp["run_environment_factor"]
+
+    # ── Team win rate ──
+    # Base 0.50, adjusted by home/away, own team run support, opponent offense.
+    home_edge = 0.02 if is_home else -0.02
+    own_support = (own["win_support_factor"] - 1.0) * 0.5
+    opp_penalty = (opp["offense_strength"] - 1.0) * 0.3
+    team_win_rate = max(0.35, min(0.65, 0.50 + home_edge + own_support - opp_penalty))
+
+    # ── Bullpen factor ──
+    bullpen_factor = own["bullpen_support_factor"]
 
     return MatchupContext(
         is_home=is_home,
-        ip_adjustment=ip_adj,
-        team_win_rate=0.52 if is_home else 0.48,  # simple home-field edge
+        ip_adjustment=round(ip_adj, 3),
+        opp_k_factor=round(opp_k_factor, 3),
+        opp_hit_factor=round(opp_hit_factor, 3),
+        opp_era_factor=round(opp_era_factor, 3),
+        park_factor=round(park_factor, 3),
+        team_win_rate=round(team_win_rate, 3),
+        bullpen_factor=round(bullpen_factor, 3),
+        run_env_factor=round(run_env_factor, 3),
     )
 
 
@@ -135,7 +184,7 @@ def project_pitcher_line(
     bf = proj_ip * BF_PER_IP
 
     # ── Strikeouts ──
-    # K rate adjusted by opponent K factor and park factor (inverse for K)
+    # K rate adjusted by opponent K tendency (high-K lineups are easier to K)
     adj_k_pct = bl["k_pct"] * ctx.opp_k_factor
     proj_k = round(bf * (adj_k_pct / 100), 1)
 
@@ -163,19 +212,27 @@ def project_pitcher_line(
     proj_whip = round((proj_h + proj_bb) / proj_ip, 2) if proj_ip > 0 else 0.0
 
     # ── Win probability ──
-    # Factors: pitcher quality (ERA), team environment, innings depth, home field
-    # Base: team win rate when their starter pitches
+    # Factors: pitcher quality (ERA), team environment, innings depth,
+    # home field, bullpen quality
     era_edge = max(-0.12, min(0.12, (4.20 - effective_era) / 4.20 * 0.12))
     ip_edge = max(0, (proj_ip - 5.0) / 5.0) * 0.06
     whip_edge = max(-0.06, min(0.06, (1.28 - bl["whip"]) / 1.28 * 0.06))
-    win_prob = round(max(0.15, min(0.70, ctx.team_win_rate + era_edge + ip_edge + whip_edge)), 2)
+    bullpen_edge = (ctx.bullpen_factor - 1.0) * 0.35
+    win_prob = round(max(0.15, min(0.70,
+        ctx.team_win_rate + era_edge + ip_edge + whip_edge + bullpen_edge
+    )), 2)
 
     # ── Blowup probability ──
-    # "Blowup" = 5+ ER outing. Higher ERA/WHIP and shorter projected IP → more risk.
+    # "Blowup" = 5+ ER outing. Higher ERA/WHIP, shorter IP, stronger
+    # opponent, and hitter-friendly environment all increase risk.
     era_risk = max(0, (effective_era - 3.00) / 4.00) * 0.18
     whip_risk = max(0, (bl["whip"] - 1.00) / 0.50) * 0.12
-    ip_risk = max(0, (5.5 - proj_ip) / 3.0) * 0.08  # shorter outings = less buffer
-    blowup = round(max(0.03, min(0.50, 0.06 + era_risk + whip_risk + ip_risk)), 2)
+    ip_risk = max(0, (5.5 - proj_ip) / 3.0) * 0.08
+    env_risk = (ctx.run_env_factor - 1.0) * 0.10
+    opp_risk = max(0, (ctx.opp_era_factor - 1.0)) * 0.06
+    blowup = round(max(0.03, min(0.50,
+        0.06 + era_risk + whip_risk + ip_risk + env_risk + opp_risk
+    )), 2)
 
     # ── Confidence ──
     if defaults_used == 0 and bl["xera"] is not None:
@@ -234,11 +291,16 @@ def project_pitcher_line(
             "opp_era_factor": ctx.opp_era_factor,
             "park_factor": ctx.park_factor,
             "team_win_rate": ctx.team_win_rate,
+            "bullpen_factor": ctx.bullpen_factor,
+            "run_env_factor": ctx.run_env_factor,
         },
         "intermediate": {
             "effective_era": round(effective_era, 3),
             "batters_faced": round(bf, 1),
             "defaults_used": defaults_used,
+            "bullpen_edge": round(bullpen_edge, 4),
+            "env_risk": round(env_risk, 4),
+            "opp_risk": round(opp_risk, 4),
         },
         "score_breakdown": {
             "k_pts": round(k_pts, 1),
@@ -258,14 +320,22 @@ def project_pitcher_line(
 def build_daily_projections_for_starters(
     starters: list[StarterRecord],
     baselines: list[BaselineRecord],
+    team_context_map: dict[str, dict] | None = None,
     model_version: str = MODEL_VERSION,
 ) -> tuple[list[ProjectionRecord], list[dict]]:
     """Build projections for all starters that have a matching baseline.
+
+    Args:
+        starters: probable starters for the day
+        baselines: pitcher baseline records
+        team_context_map: optional dict keyed by team_code with context factors
+        model_version: model version string
 
     Returns:
         (projections sorted by stream_score desc, debug_info list)
     """
     baseline_map = {bl.pitcher_name: bl for bl in baselines}
+    tc_map = team_context_map or {}
 
     projections: list[ProjectionRecord] = []
     debug_list: list[dict] = []
@@ -279,8 +349,19 @@ def build_daily_projections_for_starters(
             continue
 
         matched += 1
-        ctx = build_matchup_context(s)
+
+        # Look up team context for own team and opponent
+        own_ctx = tc_map.get(s.pitcher_team)
+        opp_ctx = tc_map.get(s.opponent_team)
+
+        ctx = build_matchup_context(s, own_ctx, opp_ctx)
         proj, debug = project_pitcher_line(s, bl, ctx, model_version)
+
+        # Add team context info to debug output
+        debug["team_context"] = {
+            "own_team": own_ctx,
+            "opp_team": opp_ctx,
+        }
 
         defaults_total += ctx.defaults_used
         projections.append(proj)
@@ -307,8 +388,10 @@ def build_daily_projections_for_starters(
 
     projections.sort(key=lambda p: p.stream_score, reverse=True)
 
+    team_ctx_status = f"{len(tc_map)} teams" if tc_map else "none (neutral)"
     logger.info(
-        "Projections built: %d/%d starters matched, %d total defaults used, model=%s",
-        matched, len(starters), defaults_total, model_version,
+        "Projections built: %d/%d starters matched, %d total defaults used, "
+        "team_context=%s, model=%s",
+        matched, len(starters), defaults_total, team_ctx_status, model_version,
     )
     return projections, debug_list
