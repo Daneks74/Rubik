@@ -67,6 +67,7 @@ def _normalize_starter_record(
 
     pitch_hand = pitcher_data.get("pitchHand", {})
     throws = pitch_hand.get("code") if pitch_hand else None
+    player_id = pitcher_data.get("id")
 
     return StarterRecord(
         game_date=game_date,
@@ -78,6 +79,7 @@ def _normalize_starter_record(
         throws=throws or "",
         status=status,
         source="mlb",
+        mlb_player_id=player_id,
     )
 
 

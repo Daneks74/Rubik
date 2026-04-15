@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import FastAPI, Query
 from sqlalchemy import delete, func
 
+from app.baselines import get_pitcher_baselines_for_starters, upsert_pitcher_baselines
 from app.db import SessionLocal, init_db, prune_old_data
 from app.models import (
     AppRun,
@@ -16,7 +17,6 @@ from app.models import (
 from app.probable_starters import get_probable_starters
 from app.projection_builder import (
     MODEL_VERSION,
-    build_demo_baselines,
     build_demo_daily_projections,
 )
 
@@ -31,20 +31,22 @@ logger = logging.getLogger(__name__)
 
 def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     """Run the full projection pipeline for a date.
-    Uses real MLB starters with demo-fallback, then demo baselines + projections.
-    Replaces any existing data for that date. Returns a summary dict."""
+    Uses real MLB starters, real baselines (with per-pitcher fallback),
+    then demo projections. Replaces any existing data for that date."""
 
     logger.info("Building projection slate for %s", target_date)
 
     # 1. Get probable starters (real MLB or demo fallback)
-    starters, used_fallback = get_probable_starters(target_date)
-    source = "demo-fallback" if used_fallback else "mlb"
+    starters, starter_fallback = get_probable_starters(target_date)
+    starter_source = "demo-fallback" if starter_fallback else "mlb"
 
-    # 2. Build demo baselines and projections from those starters
-    baselines = build_demo_baselines(starters, season_year)
+    # 2. Get baselines (real MLB stats with per-pitcher demo fallback)
+    baselines, baseline_fallback_count = get_pitcher_baselines_for_starters(starters, season_year)
+
+    # 3. Build projections from baselines
     projections = build_demo_daily_projections(starters, baselines)
 
-    # 3. Clear existing rows for this date
+    # 4. Clear existing rows for this date
     del_ps = db.execute(
         delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
     ).rowcount
@@ -53,17 +55,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     ).rowcount
     logger.info("Cleared %d starters, %d projections for %s", del_ps, del_dp, target_date)
 
-    # 4. Replace baselines for these pitchers
-    pitcher_names = [s.pitcher_name for s in starters]
-    del_bl = db.execute(
-        delete(PitcherBaseline).where(
-            PitcherBaseline.pitcher_name.in_(pitcher_names),
-            PitcherBaseline.season_year == season_year,
-        )
-    ).rowcount
-    logger.info("Cleared %d baselines for slate pitchers", del_bl)
-
-    # 5. Insert new rows
+    # 5. Insert starters
     for s in starters:
         db.add(ProbableStarter(
             game_date=s.game_date, game_id=s.game_id,
@@ -72,15 +64,10 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
             throws=s.throws, status=s.status, source=s.source,
         ))
 
-    for bl in baselines:
-        db.add(PitcherBaseline(
-            pitcher_name=bl.pitcher_name, pitcher_team=bl.pitcher_team,
-            season_year=bl.season_year, ros_ip_per_start=bl.ros_ip_per_start,
-            ros_k_pct=bl.ros_k_pct, ros_bb_pct=bl.ros_bb_pct,
-            ros_era=bl.ros_era, ros_whip=bl.ros_whip,
-            xera=bl.xera, xwoba=bl.xwoba,
-        ))
+    # 6. Upsert baselines
+    baselines_inserted = upsert_pitcher_baselines(db, baselines, season_year)
 
+    # 7. Insert projections
     for p in projections:
         db.add(DailyPitcherProjection(
             game_date=p.game_date, game_id=p.game_id,
@@ -96,19 +83,19 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
 
     db.commit()
     logger.info("Inserted %d starters, %d baselines, %d projections for %s",
-                len(starters), len(baselines), len(projections), target_date)
+                len(starters), baselines_inserted, len(projections), target_date)
 
     return {
         "target_date": target_date.isoformat(),
-        "source": source,
-        "used_fallback": used_fallback,
+        "starter_source": starter_source,
+        "starter_fallback": starter_fallback,
         "starters_inserted": len(starters),
-        "baselines_inserted": len(baselines),
+        "baselines_inserted": baselines_inserted,
+        "baseline_fallback_count": baseline_fallback_count,
         "projections_inserted": len(projections),
         "model_version": MODEL_VERSION,
         "cleared": {
             "probable_starters": del_ps,
-            "pitcher_baselines": del_bl,
             "daily_pitcher_projections": del_dp,
         },
     }
@@ -121,7 +108,6 @@ def _refresh_starters_to_db(db, target_date: date) -> dict:
     starters, used_fallback = get_probable_starters(target_date)
     source = "demo-fallback" if used_fallback else "mlb"
 
-    # Clear existing starters for this date
     del_count = db.execute(
         delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
     ).rowcount
@@ -135,7 +121,6 @@ def _refresh_starters_to_db(db, target_date: date) -> dict:
             throws=s.throws, status=s.status, source=s.source,
         ))
 
-    # Log app_run
     db.add(AppRun(
         run_type="probable_starters_refresh", status="success",
         details=f"date={target_date}, source={source}, count={len(starters)}, "
@@ -150,6 +135,55 @@ def _refresh_starters_to_db(db, target_date: date) -> dict:
         "source": source,
         "used_fallback": used_fallback,
         "cleared": del_count,
+    }
+
+
+def _refresh_baselines_to_db(db, target_date: date, season_year: int = 2026) -> dict:
+    """Load stored starters for a date, fetch baselines, upsert. Returns summary."""
+
+    logger.info("Refreshing baselines for starters on %s", target_date)
+
+    # Load stored starters
+    stored = (
+        db.query(ProbableStarter)
+        .filter(ProbableStarter.game_date == target_date)
+        .all()
+    )
+
+    if not stored:
+        msg = f"No stored starters for {target_date} — run refresh-probable-starters first"
+        logger.warning(msg)
+        return {"error": msg, "target_date": target_date.isoformat()}
+
+    # Convert ORM rows to StarterRecords for the baseline builder
+    from app.projection_builder import StarterRecord
+    starters = [
+        StarterRecord(
+            game_date=s.game_date, game_id=s.game_id,
+            pitcher_name=s.pitcher_name, pitcher_team=s.pitcher_team,
+            opponent_team=s.opponent_team, home_away=s.home_away,
+            throws=s.throws or "", status=s.status, source=s.source or "",
+        )
+        for s in stored
+    ]
+
+    baselines, fallback_count = get_pitcher_baselines_for_starters(starters, season_year)
+    inserted = upsert_pitcher_baselines(db, baselines, season_year)
+
+    db.add(AppRun(
+        run_type="baseline_refresh", status="success",
+        details=f"date={target_date}, starters={len(starters)}, "
+                f"baselines={inserted}, fallback={fallback_count}",
+    ))
+    db.commit()
+
+    logger.info("Baseline refresh: %d starters, %d baselines, %d fallback",
+                len(starters), inserted, fallback_count)
+    return {
+        "target_date": target_date.isoformat(),
+        "starters": len(starters),
+        "baselines_refreshed": inserted,
+        "fallback_count": fallback_count,
     }
 
 
@@ -220,10 +254,7 @@ def projections_tomorrow(
     min_confidence: Optional[str] = Query(None, description="Filter: low, medium, high"),
     limit: int = Query(50, ge=1, le=200),
 ):
-    if date:
-        target = _parse_date(date)
-    else:
-        target = _tomorrow()
+    target = _parse_date(date) if date else _tomorrow()
 
     logger.info("Fetching projections for %s (min_confidence=%s, limit=%d)",
                 target, min_confidence, limit)
@@ -248,7 +279,6 @@ def projections_tomorrow(
             .all()
         )
 
-        # Build a lookup for home_away from probable_starters
         starter_map: dict[str, ProbableStarter] = {}
         if rows:
             starters = (
@@ -357,6 +387,50 @@ def admin_probable_starters(
         db.close()
 
 
+@app.get("/admin/pitcher-baselines")
+def admin_pitcher_baselines(
+    pitcher_name: Optional[str] = Query(None),
+    season_year: Optional[int] = Query(None),
+    limit: int = Query(25, ge=1, le=200),
+):
+    db = SessionLocal()
+    try:
+        query = db.query(PitcherBaseline)
+        if pitcher_name:
+            query = query.filter(PitcherBaseline.pitcher_name == pitcher_name)
+        if season_year:
+            query = query.filter(PitcherBaseline.season_year == season_year)
+
+        rows = (
+            query
+            .order_by(PitcherBaseline.updated_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        return {
+            "count": len(rows),
+            "baselines": [
+                {
+                    "pitcher_name": r.pitcher_name,
+                    "pitcher_team": r.pitcher_team,
+                    "season_year": r.season_year,
+                    "ros_ip_per_start": r.ros_ip_per_start,
+                    "ros_k_pct": r.ros_k_pct,
+                    "ros_bb_pct": r.ros_bb_pct,
+                    "ros_era": r.ros_era,
+                    "ros_whip": r.ros_whip,
+                    "xera": r.xera,
+                    "xwoba": r.xwoba,
+                    "updated_at": str(r.updated_at) if r.updated_at else None,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
 @app.post("/admin/refresh-probable-starters")
 def admin_refresh_probable_starters(
     date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
@@ -371,10 +445,37 @@ def admin_refresh_probable_starters(
         db.rollback()
         logger.error("Probable starter refresh failed: %s", e)
 
-        # Log the failure
         try:
             db.add(AppRun(
                 run_type="probable_starters_refresh", status="error",
+                details=f"date={target}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-baselines")
+def admin_refresh_baselines(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+):
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        summary = _refresh_baselines_to_db(db, target)
+        return summary
+    except Exception as e:
+        db.rollback()
+        logger.error("Baseline refresh failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="baseline_refresh", status="error",
                 details=f"date={target}, error={e}",
             ))
             db.commit()
@@ -434,10 +535,7 @@ def prune_now():
 def build_demo_projections(
     date: Optional[str] = Query(None, description="Target date as YYYY-MM-DD, defaults to tomorrow"),
 ):
-    if date:
-        target = _parse_date(date)
-    else:
-        target = _tomorrow()
+    target = _parse_date(date) if date else _tomorrow()
 
     db = SessionLocal()
     try:
@@ -445,11 +543,11 @@ def build_demo_projections(
 
         db.add(AppRun(
             run_type="projection_build", status="success",
-            details=f"date={target}, source={summary['source']}, "
+            details=f"date={target}, starter_source={summary['starter_source']}, "
                     f"starters={summary['starters_inserted']}, "
                     f"baselines={summary['baselines_inserted']}, "
-                    f"projections={summary['projections_inserted']}, "
-                    f"fallback={summary['used_fallback']}",
+                    f"baseline_fallbacks={summary['baseline_fallback_count']}, "
+                    f"projections={summary['projections_inserted']}",
         ))
         db.commit()
 

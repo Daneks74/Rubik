@@ -52,6 +52,7 @@ class StarterRecord:
     throws: str
     status: str = "probable"
     source: str = "demo"
+    mlb_player_id: int | None = None
 
 
 @dataclass
@@ -64,8 +65,8 @@ class BaselineRecord:
     ros_bb_pct: float
     ros_era: float
     ros_whip: float
-    xera: float
-    xwoba: float
+    xera: float | None = None
+    xwoba: float | None = None
 
 
 @dataclass
@@ -192,7 +193,12 @@ def build_demo_daily_projections(
         blowup = round(min(0.50, 0.05 + era_risk + whip_risk), 2)
 
         # Confidence: based on how tight the baseline metrics are
-        xera_gap = abs(bl.ros_era - bl.xera)
+        # If xERA unavailable, base confidence on ERA and WHIP alone
+        if bl.xera is not None:
+            xera_gap = abs(bl.ros_era - bl.xera)
+        else:
+            xera_gap = 0.20  # assume moderate gap when unknown
+
         if xera_gap < 0.15 and bl.ros_whip < 1.15:
             confidence = "high"
         elif xera_gap < 0.30 or bl.ros_whip < 1.25:

@@ -29,9 +29,10 @@ def init_db():
 
 def prune_old_data(session: Session) -> dict[str, int]:
     """Delete stale rows to keep storage small. Returns counts deleted per table."""
-    from app.models import AppRun, DailyPitcherProjection, ProbableStarter
+    from app.models import AppRun, DailyPitcherProjection, PitcherBaseline, ProbableStarter
 
     now = datetime.now(timezone.utc)
+    current_year = now.year
     counts = {}
 
     # probable_starters older than 7 days
@@ -47,6 +48,16 @@ def prune_old_data(session: Session) -> dict[str, int]:
         delete(DailyPitcherProjection).where(DailyPitcherProjection.generated_at < cutoff)
     )
     counts["daily_pitcher_projections"] = result.rowcount
+
+    # pitcher_baselines: remove non-current-season OR updated more than 30 days ago
+    cutoff = now - timedelta(days=30)
+    result = session.execute(
+        delete(PitcherBaseline).where(
+            (PitcherBaseline.season_year != current_year) |
+            (PitcherBaseline.updated_at < cutoff)
+        )
+    )
+    counts["pitcher_baselines"] = result.rowcount
 
     # app_runs older than 30 days
     cutoff = now - timedelta(days=30)
