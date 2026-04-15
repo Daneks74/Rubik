@@ -16,8 +16,13 @@ from app.models import (
 )
 from app.probable_starters import get_probable_starters
 from app.projection_builder import (
-    MODEL_VERSION,
+    BaselineRecord,
+    StarterRecord,
     build_demo_daily_projections,
+)
+from app.projection_engine import (
+    MODEL_VERSION,
+    build_daily_projections_for_starters,
 )
 
 logging.basicConfig(
@@ -32,7 +37,7 @@ logger = logging.getLogger(__name__)
 def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     """Run the full projection pipeline for a date.
     Uses real MLB starters, real baselines (with per-pitcher fallback),
-    then demo projections. Replaces any existing data for that date."""
+    then formula-v1 projections. Replaces any existing data for that date."""
 
     logger.info("Building projection slate for %s", target_date)
 
@@ -43,8 +48,8 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     # 2. Get baselines (real MLB stats with per-pitcher demo fallback)
     baselines, baseline_fallback_count = get_pitcher_baselines_for_starters(starters, season_year)
 
-    # 3. Build projections from baselines
-    projections = build_demo_daily_projections(starters, baselines)
+    # 3. Build projections using the formula engine
+    projections, _debug = build_daily_projections_for_starters(starters, baselines)
 
     # 4. Clear existing rows for this date
     del_ps = db.execute(
@@ -156,7 +161,6 @@ def _refresh_baselines_to_db(db, target_date: date, season_year: int = 2026) -> 
         return {"error": msg, "target_date": target_date.isoformat()}
 
     # Convert ORM rows to StarterRecords for the baseline builder
-    from app.projection_builder import StarterRecord
     starters = [
         StarterRecord(
             game_date=s.game_date, game_id=s.game_id,
@@ -566,6 +570,184 @@ def build_demo_projections(
             db.rollback()
 
         return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.post("/admin/build-projections")
+def build_projections(
+    date: Optional[str] = Query(None, description="Target date as YYYY-MM-DD, defaults to tomorrow"),
+    season_year: int = Query(2026, description="Season year for baselines"),
+):
+    """Build formula-v1 projections from stored starters and baselines.
+
+    Loads starters and baselines already in the DB, runs the projection engine,
+    and stores results. Use refresh-probable-starters and refresh-baselines first
+    to populate upstream data.
+    """
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        # Load stored starters
+        stored_starters = (
+            db.query(ProbableStarter)
+            .filter(ProbableStarter.game_date == target)
+            .all()
+        )
+        if not stored_starters:
+            return {"error": f"No stored starters for {target} — run refresh-probable-starters first"}
+
+        # Load stored baselines
+        stored_baselines = (
+            db.query(PitcherBaseline)
+            .filter(PitcherBaseline.season_year == season_year)
+            .all()
+        )
+        if not stored_baselines:
+            return {"error": f"No stored baselines for {season_year} — run refresh-baselines first"}
+
+        # Convert ORM rows to pipeline records
+        starters = [
+            StarterRecord(
+                game_date=s.game_date, game_id=s.game_id,
+                pitcher_name=s.pitcher_name, pitcher_team=s.pitcher_team,
+                opponent_team=s.opponent_team, home_away=s.home_away,
+                throws=s.throws or "", status=s.status, source=s.source or "",
+            )
+            for s in stored_starters
+        ]
+        baselines = [
+            BaselineRecord(
+                pitcher_name=b.pitcher_name, pitcher_team=b.pitcher_team,
+                season_year=b.season_year,
+                ros_ip_per_start=b.ros_ip_per_start, ros_k_pct=b.ros_k_pct,
+                ros_bb_pct=b.ros_bb_pct, ros_era=b.ros_era, ros_whip=b.ros_whip,
+                xera=b.xera, xwoba=b.xwoba,
+            )
+            for b in stored_baselines
+        ]
+
+        # Run formula engine
+        projections, debug_list = build_daily_projections_for_starters(starters, baselines)
+
+        # Clear existing projections for this date
+        del_count = db.execute(
+            delete(DailyPitcherProjection).where(DailyPitcherProjection.game_date == target)
+        ).rowcount
+
+        # Insert new projections
+        for p in projections:
+            db.add(DailyPitcherProjection(
+                game_date=p.game_date, game_id=p.game_id,
+                pitcher_name=p.pitcher_name, pitcher_team=p.pitcher_team,
+                opponent_team=p.opponent_team, projected_ip=p.projected_ip,
+                projected_k=p.projected_k, projected_bb=p.projected_bb,
+                projected_h=p.projected_h, projected_er=p.projected_er,
+                projected_era=p.projected_era, projected_whip=p.projected_whip,
+                win_probability=p.win_probability, blowup_probability=p.blowup_probability,
+                confidence=p.confidence, stream_score=p.stream_score,
+                model_version=p.model_version,
+            ))
+
+        db.add(AppRun(
+            run_type="projection_build", status="success",
+            details=f"date={target}, model={MODEL_VERSION}, "
+                    f"starters={len(starters)}, baselines={len(baselines)}, "
+                    f"projections={len(projections)}, cleared={del_count}",
+        ))
+        db.commit()
+
+        logger.info("Built %d formula projections for %s (cleared %d old)",
+                     len(projections), target, del_count)
+
+        return {
+            "target_date": target.isoformat(),
+            "model_version": MODEL_VERSION,
+            "starters_loaded": len(starters),
+            "baselines_loaded": len(baselines),
+            "projections_built": len(projections),
+            "cleared": del_count,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("Projection build failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="projection_build", status="error",
+                details=f"date={target}, model={MODEL_VERSION}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/projection-debug")
+def projection_debug(
+    date: Optional[str] = Query(None, description="Target date as YYYY-MM-DD, defaults to tomorrow"),
+    season_year: int = Query(2026, description="Season year for baselines"),
+    pitcher_name: Optional[str] = Query(None, description="Filter to a single pitcher"),
+):
+    """Return debug info for each pitcher's projection — baseline inputs,
+    matchup context, intermediate values, and score breakdown.
+
+    Does NOT write to DB; runs the engine in read-only mode against stored data.
+    """
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        # Load stored starters
+        starter_query = db.query(ProbableStarter).filter(ProbableStarter.game_date == target)
+        if pitcher_name:
+            starter_query = starter_query.filter(ProbableStarter.pitcher_name == pitcher_name)
+        stored_starters = starter_query.all()
+
+        if not stored_starters:
+            return {"error": f"No stored starters for {target}", "date": target.isoformat()}
+
+        # Load stored baselines
+        stored_baselines = (
+            db.query(PitcherBaseline)
+            .filter(PitcherBaseline.season_year == season_year)
+            .all()
+        )
+
+        # Convert to pipeline records
+        starters = [
+            StarterRecord(
+                game_date=s.game_date, game_id=s.game_id,
+                pitcher_name=s.pitcher_name, pitcher_team=s.pitcher_team,
+                opponent_team=s.opponent_team, home_away=s.home_away,
+                throws=s.throws or "", status=s.status, source=s.source or "",
+            )
+            for s in stored_starters
+        ]
+        baselines = [
+            BaselineRecord(
+                pitcher_name=b.pitcher_name, pitcher_team=b.pitcher_team,
+                season_year=b.season_year,
+                ros_ip_per_start=b.ros_ip_per_start, ros_k_pct=b.ros_k_pct,
+                ros_bb_pct=b.ros_bb_pct, ros_era=b.ros_era, ros_whip=b.ros_whip,
+                xera=b.xera, xwoba=b.xwoba,
+            )
+            for b in stored_baselines
+        ]
+
+        # Run engine (read-only — we only want the debug output)
+        projections, debug_list = build_daily_projections_for_starters(starters, baselines)
+
+        return {
+            "date": target.isoformat(),
+            "model_version": MODEL_VERSION,
+            "pitcher_count": len(debug_list),
+            "pitchers": debug_list,
+        }
     finally:
         db.close()
 
