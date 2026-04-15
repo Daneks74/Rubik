@@ -1,9 +1,10 @@
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, delete
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -24,3 +25,35 @@ def init_db():
     logger.info("Connecting to database...")
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created successfully")
+
+
+def prune_old_data(session: Session) -> dict[str, int]:
+    """Delete stale rows to keep storage small. Returns counts deleted per table."""
+    from app.models import AppRun, DailyPitcherProjection, ProbableStarter
+
+    now = datetime.now(timezone.utc)
+    counts = {}
+
+    # probable_starters older than 7 days
+    cutoff = now - timedelta(days=7)
+    result = session.execute(
+        delete(ProbableStarter).where(ProbableStarter.created_at < cutoff)
+    )
+    counts["probable_starters"] = result.rowcount
+
+    # daily_pitcher_projections older than 14 days
+    cutoff = now - timedelta(days=14)
+    result = session.execute(
+        delete(DailyPitcherProjection).where(DailyPitcherProjection.generated_at < cutoff)
+    )
+    counts["daily_pitcher_projections"] = result.rowcount
+
+    # app_runs older than 30 days
+    cutoff = now - timedelta(days=30)
+    result = session.execute(
+        delete(AppRun).where(AppRun.created_at < cutoff)
+    )
+    counts["app_runs"] = result.rowcount
+
+    session.commit()
+    return counts
