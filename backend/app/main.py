@@ -13,11 +13,11 @@ from app.models import (
     PitcherBaseline,
     ProbableStarter,
 )
+from app.probable_starters import get_probable_starters
 from app.projection_builder import (
     MODEL_VERSION,
     build_demo_baselines,
     build_demo_daily_projections,
-    build_demo_probable_starters,
 )
 
 logging.basicConfig(
@@ -30,17 +30,21 @@ logger = logging.getLogger(__name__)
 # ── Helpers ──
 
 def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
-    """Run the full demo pipeline for a date: build starters, baselines, projections.
+    """Run the full projection pipeline for a date.
+    Uses real MLB starters with demo-fallback, then demo baselines + projections.
     Replaces any existing data for that date. Returns a summary dict."""
 
-    logger.info("Building demo slate for %s", target_date)
+    logger.info("Building projection slate for %s", target_date)
 
-    # 1. Build demo data
-    starters = build_demo_probable_starters(target_date)
+    # 1. Get probable starters (real MLB or demo fallback)
+    starters, used_fallback = get_probable_starters(target_date)
+    source = "demo-fallback" if used_fallback else "mlb"
+
+    # 2. Build demo baselines and projections from those starters
     baselines = build_demo_baselines(starters, season_year)
     projections = build_demo_daily_projections(starters, baselines)
 
-    # 2. Clear existing rows for this date
+    # 3. Clear existing rows for this date
     del_ps = db.execute(
         delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
     ).rowcount
@@ -49,7 +53,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     ).rowcount
     logger.info("Cleared %d starters, %d projections for %s", del_ps, del_dp, target_date)
 
-    # 3. Replace baselines for these pitchers (simpler than upsert for demo)
+    # 4. Replace baselines for these pitchers
     pitcher_names = [s.pitcher_name for s in starters]
     del_bl = db.execute(
         delete(PitcherBaseline).where(
@@ -59,7 +63,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     ).rowcount
     logger.info("Cleared %d baselines for slate pitchers", del_bl)
 
-    # 4. Insert new rows
+    # 5. Insert new rows
     for s in starters:
         db.add(ProbableStarter(
             game_date=s.game_date, game_id=s.game_id,
@@ -96,6 +100,8 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
 
     return {
         "target_date": target_date.isoformat(),
+        "source": source,
+        "used_fallback": used_fallback,
         "starters_inserted": len(starters),
         "baselines_inserted": len(baselines),
         "projections_inserted": len(projections),
@@ -105,6 +111,45 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
             "pitcher_baselines": del_bl,
             "daily_pitcher_projections": del_dp,
         },
+    }
+
+
+def _refresh_starters_to_db(db, target_date: date) -> dict:
+    """Fetch and replace probable starters only (no projections). Returns summary."""
+
+    logger.info("Refreshing probable starters for %s", target_date)
+    starters, used_fallback = get_probable_starters(target_date)
+    source = "demo-fallback" if used_fallback else "mlb"
+
+    # Clear existing starters for this date
+    del_count = db.execute(
+        delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
+    ).rowcount
+    logger.info("Cleared %d existing starters for %s", del_count, target_date)
+
+    for s in starters:
+        db.add(ProbableStarter(
+            game_date=s.game_date, game_id=s.game_id,
+            pitcher_name=s.pitcher_name, pitcher_team=s.pitcher_team,
+            opponent_team=s.opponent_team, home_away=s.home_away,
+            throws=s.throws, status=s.status, source=s.source,
+        ))
+
+    # Log app_run
+    db.add(AppRun(
+        run_type="probable_starters_refresh", status="success",
+        details=f"date={target_date}, source={source}, count={len(starters)}, "
+                f"fallback={used_fallback}, cleared={del_count}",
+    ))
+    db.commit()
+
+    logger.info("Inserted %d starters for %s (source=%s)", len(starters), target_date, source)
+    return {
+        "target_date": target_date.isoformat(),
+        "inserted": len(starters),
+        "source": source,
+        "used_fallback": used_fallback,
+        "cleared": del_count,
     }
 
 
@@ -276,6 +321,98 @@ def db_summary():
         db.close()
 
 
+@app.get("/admin/probable-starters")
+def admin_probable_starters(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+):
+    target = _parse_date(date) if date else _tomorrow()
+    logger.info("Fetching stored probable starters for %s", target)
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(ProbableStarter)
+            .filter(ProbableStarter.game_date == target)
+            .order_by(ProbableStarter.pitcher_team, ProbableStarter.pitcher_name)
+            .all()
+        )
+
+        return {
+            "date": target.isoformat(),
+            "count": len(rows),
+            "starters": [
+                {
+                    "pitcher_name": r.pitcher_name,
+                    "pitcher_team": r.pitcher_team,
+                    "opponent_team": r.opponent_team,
+                    "home_away": r.home_away,
+                    "throws": r.throws,
+                    "status": r.status,
+                    "source": r.source,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-probable-starters")
+def admin_refresh_probable_starters(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+):
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        summary = _refresh_starters_to_db(db, target)
+        return summary
+    except Exception as e:
+        db.rollback()
+        logger.error("Probable starter refresh failed: %s", e)
+
+        # Log the failure
+        try:
+            db.add(AppRun(
+                run_type="probable_starters_refresh", status="error",
+                details=f"date={target}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/last-run-status")
+def admin_last_run_status():
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(AppRun)
+            .order_by(AppRun.created_at.desc())
+            .limit(10)
+            .all()
+        )
+
+        return {
+            "count": len(rows),
+            "runs": [
+                {
+                    "run_type": r.run_type,
+                    "status": r.status,
+                    "details": r.details,
+                    "created_at": str(r.created_at) if r.created_at else None,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
 @app.post("/admin/prune-now")
 def prune_now():
     db = SessionLocal()
@@ -308,16 +445,28 @@ def build_demo_projections(
 
         db.add(AppRun(
             run_type="projection_build", status="success",
-            details=f"date={target}, starters={summary['starters_inserted']}, "
+            details=f"date={target}, source={summary['source']}, "
+                    f"starters={summary['starters_inserted']}, "
                     f"baselines={summary['baselines_inserted']}, "
-                    f"projections={summary['projections_inserted']}",
+                    f"projections={summary['projections_inserted']}, "
+                    f"fallback={summary['used_fallback']}",
         ))
         db.commit()
 
         return summary
     except Exception as e:
         db.rollback()
-        logger.error("Demo projection build failed: %s", e)
+        logger.error("Projection build failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="projection_build", status="error",
+                details=f"date={target}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
         return {"error": str(e)}
     finally:
         db.close()
@@ -325,7 +474,7 @@ def build_demo_projections(
 
 @app.post("/admin/seed-demo-data")
 def seed_demo_data():
-    """Convenience alias — builds demo projections for tomorrow."""
+    """Convenience alias — builds projections for tomorrow."""
     return build_demo_projections()
 
 
