@@ -59,9 +59,9 @@ def prune_old_data(session: Session) -> dict[str, int]:
     )
     counts["pitcher_baselines"] = result.rowcount
 
-    # team_context: remove non-current-season rows
+    # team_context: keep current + previous season, delete older
     result = session.execute(
-        delete(TeamContext).where(TeamContext.season_year != current_year)
+        delete(TeamContext).where(TeamContext.season_year < current_year - 1)
     )
     counts["team_context"] = result.rowcount
 

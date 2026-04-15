@@ -25,7 +25,7 @@ from app.projection_engine import (
     MODEL_VERSION,
     build_daily_projections_for_starters,
 )
-from app.team_context import get_default_team_context, get_team_context_map, upsert_team_context
+from app.team_context import get_team_context_map, refresh_team_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -779,23 +779,26 @@ def projection_debug(
 def admin_refresh_team_context(
     season_year: int = Query(2026, description="Season year"),
 ):
-    """Generate or refresh lightweight default team context rows for all 30 MLB teams."""
+    """Refresh team context from real MLB Stats API data, falling back to
+    static defaults if the API is unavailable."""
     db = SessionLocal()
     try:
-        defaults = get_default_team_context(season_year)
-        count = upsert_team_context(db, defaults)
+        summary = refresh_team_context(db, season_year)
 
         db.add(AppRun(
             run_type="team_context_refresh", status="success",
-            details=f"season_year={season_year}, teams={count}",
+            details=f"season_year={season_year}, source={summary['source']}, "
+                    f"teams={summary['teams_upserted']}, "
+                    f"fallback={summary['fallback_used']}",
         ))
         db.commit()
 
-        logger.info("Team context refresh: %d teams for %d", count, season_year)
-        return {
-            "season_year": season_year,
-            "teams_upserted": count,
-        }
+        logger.info(
+            "Team context refresh: %d teams for %d (source=%s, fallback=%s)",
+            summary["teams_upserted"], season_year,
+            summary["source"], summary["fallback_used"],
+        )
+        return summary
     except Exception as e:
         db.rollback()
         logger.error("Team context refresh failed: %s", e)
@@ -819,6 +822,10 @@ def admin_team_context(
     season_year: int = Query(2026, description="Season year"),
 ):
     """Return all stored team context rows for a season, sorted by team_code."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    freshness_cutoff = now - timedelta(hours=24)
+
     db = SessionLocal()
     try:
         rows = (
@@ -840,6 +847,7 @@ def admin_team_context(
                     "bullpen_support_factor": r.bullpen_support_factor,
                     "run_environment_factor": r.run_environment_factor,
                     "updated_at": str(r.updated_at) if r.updated_at else None,
+                    "recently_updated": bool(r.updated_at and r.updated_at >= freshness_cutoff),
                 }
                 for r in rows
             ],

@@ -6,7 +6,7 @@ Designed for modularity: matchup context, projection formulas, and scoring
 are all isolated so they can be upgraded independently with opponent lineups,
 park factors, bullpen quality, and simulation later.
 
-Model version: formula-v2-team-context
+Model version: formula-v3-real-team-context
 """
 import logging
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ from app.team_context import NEUTRAL_TEAM_CTX
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "formula-v2-team-context"
+MODEL_VERSION = "formula-v3-real-team-context"
 
 # ── MLB league-average defaults for missing baseline fields ──
 # Used when a pitcher's baseline is incomplete. These are roughly
