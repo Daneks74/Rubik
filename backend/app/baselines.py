@@ -15,14 +15,12 @@ sources later without changing the rest of the pipeline.
 import logging
 from datetime import date
 
-import requests
-
+from app.http_client import BASELINE_TIMEOUT, PER_PLAYER_RETRIES, resilient_get
 from app.projection_builder import BaselineRecord, StarterRecord, build_demo_baselines
 
 logger = logging.getLogger(__name__)
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-REQUEST_TIMEOUT = 12  # seconds
 
 
 # ── MLB IP parsing ──
@@ -49,8 +47,10 @@ def _fetch_pitcher_stats_by_id(player_id: int, season_year: int) -> dict | None:
     params = {"hydrate": f"stats(type=season,season={season_year},group=pitching)"}
 
     try:
-        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
+        resp = resilient_get(
+            url, params=params, timeout=BASELINE_TIMEOUT,
+            retries=PER_PLAYER_RETRIES, label="pitcher_stats",
+        )
         data = resp.json()
     except Exception as e:
         logger.warning("MLB stats fetch failed for player %d: %s", player_id, e)
@@ -73,12 +73,12 @@ def _fetch_pitcher_stats_by_id(player_id: int, season_year: int) -> dict | None:
 def _search_player_id(pitcher_name: str) -> int | None:
     """Search MLB API for a player by name. Returns their ID or None."""
     try:
-        resp = requests.get(
+        resp = resilient_get(
             f"{MLB_API_BASE}/people/search",
             params={"names": pitcher_name, "sportId": 1},
-            timeout=REQUEST_TIMEOUT,
+            timeout=BASELINE_TIMEOUT, retries=PER_PLAYER_RETRIES,
+            label="player_search",
         )
-        resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         logger.warning("MLB player search failed for '%s': %s", pitcher_name, e)
@@ -86,14 +86,14 @@ def _search_player_id(pitcher_name: str) -> int | None:
 
     rows = data.get("people", [])
     if not rows:
-        # Try the searchPlayers endpoint as backup
+        # Try without sportId filter as backup
         try:
-            resp = requests.get(
+            resp = resilient_get(
                 f"{MLB_API_BASE}/people/search",
                 params={"names": pitcher_name},
-                timeout=REQUEST_TIMEOUT,
+                timeout=BASELINE_TIMEOUT, retries=0,
+                label="player_search_fallback",
             )
-            resp.raise_for_status()
             rows = resp.json().get("people", [])
         except Exception:
             pass

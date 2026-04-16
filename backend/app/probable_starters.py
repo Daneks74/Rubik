@@ -11,14 +11,12 @@ different source without changing the rest of the pipeline.
 import logging
 from datetime import date
 
-import requests
-
+from app.http_client import resilient_get
 from app.projection_builder import StarterRecord, build_demo_probable_starters
 
 logger = logging.getLogger(__name__)
 
 MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"
-REQUEST_TIMEOUT = 15  # seconds
 
 # MLB API abbreviations are mostly standard, but normalize a few edge cases
 _TEAM_ABBREV_OVERRIDES = {
@@ -91,16 +89,15 @@ def fetch_probable_starters_from_mlb(target_date: date) -> list[StarterRecord]:
     date_str = target_date.isoformat()
     logger.info("Fetching probable starters from MLB API for %s", date_str)
 
-    resp = requests.get(
+    resp = resilient_get(
         MLB_SCHEDULE_URL,
         params={
             "date": date_str,
             "sportId": 1,
             "hydrate": "probablePitcher",
         },
-        timeout=REQUEST_TIMEOUT,
+        label="probable_starters",
     )
-    resp.raise_for_status()
 
     data = resp.json()
     dates = data.get("dates", [])

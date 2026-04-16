@@ -96,4 +96,13 @@ def prune_old_data(session: Session) -> dict[str, int]:
     counts["app_runs"] = result.rowcount
 
     session.commit()
+
+    total = sum(counts.values())
+    if total > 0:
+        logger.info(
+            "Pruning complete: %d rows deleted — %s",
+            total,
+            ", ".join(f"{k}={v}" for k, v in counts.items() if v > 0),
+        )
+
     return counts

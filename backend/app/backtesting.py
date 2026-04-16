@@ -15,10 +15,10 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-import requests
 from sqlalchemy.orm import Session
 
 from app.baselines import get_pitcher_baselines_for_starters
+from app.http_client import resilient_get
 from app.models import BacktestRun
 from app.probable_starters import fetch_probable_starters_from_mlb
 from app.projection_builder import BaselineRecord, ProjectionRecord, StarterRecord
@@ -28,7 +28,6 @@ from app.team_context import get_team_context_map
 logger = logging.getLogger(__name__)
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-REQUEST_TIMEOUT = 15
 
 # ── Team abbreviation normalization (shared pattern) ──
 
@@ -125,16 +124,15 @@ def fetch_actual_starter_results(target_date: date) -> list[ActualResult]:
     date_str = target_date.isoformat()
     logger.info("Fetching actual starter results for %s", date_str)
 
-    resp = requests.get(
+    resp = resilient_get(
         f"{MLB_API_BASE}/schedule",
         params={
             "date": date_str,
             "sportId": 1,
             "hydrate": "boxscore",
         },
-        timeout=REQUEST_TIMEOUT,
+        label="backtest_actuals",
     )
-    resp.raise_for_status()
 
     results: list[ActualResult] = []
 

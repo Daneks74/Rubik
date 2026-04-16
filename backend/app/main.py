@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Query
@@ -14,6 +14,7 @@ from app.backtesting import (
     score_streamer_rank_quality,
 )
 from app.baselines import get_pitcher_baselines_for_starters, upsert_pitcher_baselines
+from app.cache import cache
 from app.calibration import evaluate_percentile_coverage, evaluate_win_probability_calibration
 from app.db import SessionLocal, init_db, prune_old_data
 from app.lineups import (
@@ -39,6 +40,11 @@ from app.projection_builder import (
 from app.projection_engine import (
     MODEL_VERSION,
     build_daily_projections_for_starters,
+)
+from app.refresh_pipeline import (
+    STAGE_ORDER,
+    run_full_refresh,
+    run_partial_refresh,
 )
 from app.team_context import get_team_context_map, refresh_team_context
 
@@ -293,6 +299,24 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/ready")
+def readiness():
+    """Confirm DB connectivity and basic data readiness."""
+    db = SessionLocal()
+    try:
+        ar_count = db.query(func.count(AppRun.id)).scalar()
+        return {
+            "ready": True,
+            "db_connected": True,
+            "app_runs": ar_count,
+        }
+    except Exception as e:
+        logger.error("Readiness check failed: %s", e)
+        return {"ready": False, "db_connected": False, "error": str(e)}
+    finally:
+        db.close()
+
+
 # ── Projections ──
 
 @app.get("/projections/tomorrow")
@@ -303,8 +327,10 @@ def projections_tomorrow(
 ):
     target = _parse_date(date) if date else _tomorrow()
 
-    logger.info("Fetching projections for %s (min_confidence=%s, limit=%d)",
-                target, min_confidence, limit)
+    cache_key = f"projections:{target}:{min_confidence}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     db = SessionLocal()
     try:
@@ -338,15 +364,35 @@ def projections_tomorrow(
 
         latest_gen = max((r.generated_at for r in rows), default=None) if rows else None
 
-        return {
+        now = datetime.now(timezone.utc)
+        freshness = None
+        if latest_gen:
+            age = now - latest_gen
+            freshness = "fresh" if age < timedelta(hours=2) else (
+                "stale" if age < timedelta(hours=12) else "old"
+            )
+
+        used_lineups = any(
+            r.confidence == "high" for r in rows
+        ) if rows else False
+        used_simulation = any(r.k_p50 is not None for r in rows) if rows else False
+
+        result = {
             "date": target.isoformat(),
             "count": len(rows),
             "generated_at": str(latest_gen) if latest_gen else None,
+            "model_version": MODEL_VERSION,
+            "data_freshness": freshness,
+            "used_lineups": used_lineups,
+            "used_simulation": used_simulation,
             "pitchers": [
                 _projection_row_to_dict(r, starter_map.get(r.pitcher_name))
                 for r in rows
             ],
         }
+
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 
@@ -411,7 +457,11 @@ def admin_probable_starters(
     date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
 ):
     target = _parse_date(date) if date else _tomorrow()
-    logger.info("Fetching stored probable starters for %s", target)
+
+    cache_key = f"starters:{target}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     db = SessionLocal()
     try:
@@ -422,7 +472,7 @@ def admin_probable_starters(
             .all()
         )
 
-        return {
+        result = {
             "date": target.isoformat(),
             "count": len(rows),
             "starters": [
@@ -438,6 +488,8 @@ def admin_probable_starters(
                 for r in rows
             ],
         }
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 
@@ -495,6 +547,7 @@ def admin_refresh_probable_starters(
     db = SessionLocal()
     try:
         summary = _refresh_starters_to_db(db, target)
+        cache.invalidate()
         return summary
     except Exception as e:
         db.rollback()
@@ -523,6 +576,7 @@ def admin_refresh_baselines(
     db = SessionLocal()
     try:
         summary = _refresh_baselines_to_db(db, target)
+        cache.invalidate()
         return summary
     except Exception as e:
         db.rollback()
@@ -605,6 +659,7 @@ def build_demo_projections(
                     f"projections={summary['projections_inserted']}",
         ))
         db.commit()
+        cache.invalidate()
 
         return summary
     except Exception as e:
@@ -729,6 +784,7 @@ def build_projections(
 
         logger.info("Built %d projections for %s (%d simulated, cleared %d old)",
                      len(projections), target, sim_count, del_count)
+        cache.invalidate()
 
         return {
             "target_date": target.isoformat(),
@@ -924,6 +980,7 @@ def admin_refresh_team_context(
         ))
         db.commit()
 
+        cache.invalidate()
         logger.info(
             "Team context refresh: %d teams for %d (source=%s, fallback=%s)",
             summary["teams_upserted"], season_year,
@@ -953,7 +1010,11 @@ def admin_team_context(
     season_year: int = Query(2026, description="Season year"),
 ):
     """Return all stored team context rows for a season, sorted by team_code."""
-    from datetime import datetime, timedelta, timezone
+    cache_key = f"team_context:{season_year}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     now = datetime.now(timezone.utc)
     freshness_cutoff = now - timedelta(hours=24)
 
@@ -966,7 +1027,7 @@ def admin_team_context(
             .all()
         )
 
-        return {
+        result = {
             "season_year": season_year,
             "count": len(rows),
             "teams": [
@@ -983,6 +1044,8 @@ def admin_team_context(
                 for r in rows
             ],
         }
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 
@@ -1012,6 +1075,7 @@ def admin_refresh_lineups(
         ))
         db.commit()
 
+        cache.invalidate()
         logger.info("Lineup refresh: %s", summary)
         return summary
     except Exception as e:
@@ -1040,6 +1104,11 @@ def admin_lineups(
     """Return stored projected lineups for a date."""
     target = _parse_date(date) if date else _tomorrow()
 
+    cache_key = f"lineups:{target}:{team_code}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     db = SessionLocal()
     try:
         query = db.query(ProjectedLineup).filter(ProjectedLineup.game_date == target)
@@ -1050,7 +1119,7 @@ def admin_lineups(
             ProjectedLineup.team_code, ProjectedLineup.batting_order
         ).all()
 
-        return {
+        result = {
             "date": target.isoformat(),
             "count": len(rows),
             "lineups": [
@@ -1066,6 +1135,8 @@ def admin_lineups(
                 for r in rows
             ],
         }
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 
@@ -1078,6 +1149,11 @@ def admin_lineup_aggregates(
     """Return stored lineup aggregates for a date."""
     target = _parse_date(date) if date else _tomorrow()
 
+    cache_key = f"lineup_aggs:{target}:{team_code}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     db = SessionLocal()
     try:
         query = db.query(LineupAggregate).filter(LineupAggregate.game_date == target)
@@ -1086,7 +1162,7 @@ def admin_lineup_aggregates(
 
         rows = query.order_by(LineupAggregate.team_code).all()
 
-        return {
+        result = {
             "date": target.isoformat(),
             "count": len(rows),
             "aggregates": [
@@ -1105,6 +1181,8 @@ def admin_lineup_aggregates(
                 for r in rows
             ],
         }
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 
@@ -1309,6 +1387,212 @@ def admin_backtest_debug(
             "calibration": calibration,
             "percentile_coverage": coverage,
         }
+    finally:
+        db.close()
+
+
+@app.get("/admin/refresh-status")
+def admin_refresh_status():
+    """Return the latest successful refresh time for each pipeline stage
+    and whether tomorrow's slate appears ready."""
+    db = SessionLocal()
+    try:
+        stage_types = {
+            "probable_starters": "probable_starters_refresh",
+            "team_context": "team_context_refresh",
+            "baselines": "baseline_refresh",
+            "lineups": "lineup_refresh",
+            "projections": "projection_build",
+        }
+
+        now = datetime.now(timezone.utc)
+        tomorrow = date.today() + timedelta(days=1)
+        stages: dict[str, dict] = {}
+
+        for stage, run_type in stage_types.items():
+            latest = (
+                db.query(AppRun)
+                .filter(AppRun.run_type == run_type, AppRun.status == "success")
+                .order_by(AppRun.created_at.desc())
+                .first()
+            )
+            if latest and latest.created_at:
+                age_min = int((now - latest.created_at).total_seconds() / 60)
+                stages[stage] = {
+                    "last_success": str(latest.created_at),
+                    "age_minutes": age_min,
+                    "fresh": age_min < 120,
+                }
+            else:
+                stages[stage] = {
+                    "last_success": None,
+                    "age_minutes": None,
+                    "fresh": False,
+                }
+
+        proj_count = (
+            db.query(func.count(DailyPitcherProjection.id))
+            .filter(DailyPitcherProjection.game_date == tomorrow)
+            .scalar()
+        )
+        starter_count = (
+            db.query(func.count(ProbableStarter.id))
+            .filter(ProbableStarter.game_date == tomorrow)
+            .scalar()
+        )
+
+        return {
+            "stages": stages,
+            "tomorrow_date": tomorrow.isoformat(),
+            "tomorrow_starters": starter_count,
+            "tomorrow_projections": proj_count,
+            "slate_ready": proj_count > 0 and starter_count > 0,
+            "cache": cache.stats(),
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-all")
+def admin_refresh_all(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+    force: bool = Query(False, description="Force refresh even if data is fresh"),
+    season_year: int = Query(2026, description="Season year"),
+):
+    """Run the full refresh pipeline in order: starters, team context,
+    baselines, lineups, projections. Skips fresh stages unless force=true."""
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        result = run_full_refresh(db, target, season_year, force)
+
+        db.add(AppRun(
+            run_type="full_refresh", status="success",
+            details=f"date={target}, succeeded={result['succeeded']}, "
+                    f"failed={result['failed']}, skipped={result['skipped']}, "
+                    f"force={force}",
+        ))
+        db.commit()
+
+        return result
+    except Exception as e:
+        db.rollback()
+        logger.error("Full refresh failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-stage")
+def admin_refresh_stage(
+    stage: str = Query(..., description=f"Stage to refresh: {', '.join(STAGE_ORDER)}"),
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+    force: bool = Query(False, description="Force refresh even if data is fresh"),
+    season_year: int = Query(2026, description="Season year"),
+):
+    """Refresh a single pipeline stage."""
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        result = run_partial_refresh(db, stage, target, season_year, force)
+        return result
+    except Exception as e:
+        db.rollback()
+        logger.error("Stage refresh failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+# ── Streamers ──
+
+@app.get("/streamers/tomorrow")
+def streamers_tomorrow(
+    date: Optional[str] = Query(None, description="Override date as YYYY-MM-DD"),
+    min_confidence: Optional[str] = Query(None, description="Filter: low, medium, high"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Compact frontend-ready streamer picks sorted by stream_score."""
+    target = _parse_date(date) if date else _tomorrow()
+
+    cache_key = f"streamers:{target}:{min_confidence}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(DailyPitcherProjection)
+            .filter(DailyPitcherProjection.game_date == target)
+        )
+
+        if min_confidence:
+            confidence_order = {"high": 3, "medium": 2, "low": 1}
+            min_level = confidence_order.get(min_confidence.lower(), 0)
+            valid = [k for k, v in confidence_order.items() if v >= min_level]
+            query = query.filter(DailyPitcherProjection.confidence.in_(valid))
+
+        rows = (
+            query
+            .order_by(DailyPitcherProjection.stream_score.desc())
+            .limit(limit)
+            .all()
+        )
+
+        starter_map: dict[str, ProbableStarter] = {}
+        if rows:
+            starters = (
+                db.query(ProbableStarter)
+                .filter(ProbableStarter.game_date == target)
+                .all()
+            )
+            for s in starters:
+                starter_map[s.pitcher_name] = s
+
+        latest_gen = max((r.generated_at for r in rows), default=None) if rows else None
+
+        pitchers = []
+        for r in rows:
+            starter = starter_map.get(r.pitcher_name)
+            tags = []
+            if r.stream_score and r.stream_score >= 70:
+                tags.append("top-pick")
+            if r.blowup_probability and r.blowup_probability >= 0.25:
+                tags.append("risky")
+            if starter and starter.home_away == "home":
+                tags.append("home")
+            if r.k_p50 is not None:
+                tags.append("sim")
+
+            pitchers.append({
+                "pitcher_name": r.pitcher_name,
+                "pitcher_team": r.pitcher_team,
+                "opponent_team": r.opponent_team,
+                "home_away": starter.home_away if starter else None,
+                "projected_ip": r.projected_ip,
+                "projected_k": r.projected_k,
+                "projected_era": r.projected_era,
+                "projected_whip": r.projected_whip,
+                "win_probability": r.win_probability,
+                "blowup_probability": r.blowup_probability,
+                "confidence": r.confidence,
+                "stream_score": r.stream_score,
+                "tags": tags,
+            })
+
+        result = {
+            "date": target.isoformat(),
+            "count": len(pitchers),
+            "generated_at": str(latest_gen) if latest_gen else None,
+            "model_version": MODEL_VERSION,
+            "pitchers": pitchers,
+        }
+
+        cache.set(cache_key, result)
+        return result
     finally:
         db.close()
 

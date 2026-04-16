@@ -17,15 +17,14 @@ Normalization: each metric computed relative to league average, clamped [0.85, 1
 import logging
 from datetime import datetime, timezone
 
-import requests
 from sqlalchemy.orm import Session
 
+from app.http_client import resilient_get
 from app.models import TeamContext
 
 logger = logging.getLogger(__name__)
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-REQUEST_TIMEOUT = 15
 
 # ── MLB API abbreviation -> internal team code ──
 # Matches the normalization used by probable_starters.py.
@@ -138,12 +137,11 @@ def get_default_team_context(season_year: int) -> list[dict]:
 def _fetch_mlb_team_map(season_year: int) -> dict[int, str]:
     """Fetch MLB teams list and return {team_id: normalized_team_code}."""
     logger.info("Fetching MLB team list for %d", season_year)
-    resp = requests.get(
+    resp = resilient_get(
         f"{MLB_API_BASE}/teams",
         params={"sportId": 1, "season": season_year},
-        timeout=REQUEST_TIMEOUT,
+        label="team_list",
     )
-    resp.raise_for_status()
 
     teams: dict[int, str] = {}
     for t in resp.json().get("teams", []):
@@ -162,7 +160,7 @@ def _fetch_team_group_stats(season_year: int, group: str) -> dict[int, dict]:
     Returns {team_id: stat_dict} from the MLB Stats API.
     """
     logger.info("Fetching team %s stats for %d", group, season_year)
-    resp = requests.get(
+    resp = resilient_get(
         f"{MLB_API_BASE}/teams/stats",
         params={
             "stats": "season",
@@ -171,9 +169,8 @@ def _fetch_team_group_stats(season_year: int, group: str) -> dict[int, dict]:
             "sportId": 1,
             "gameType": "R",
         },
-        timeout=REQUEST_TIMEOUT,
+        label=f"team_{group}_stats",
     )
-    resp.raise_for_status()
 
     stats_list = resp.json().get("stats", [])
     if not stats_list:

@@ -19,16 +19,15 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-import requests
 from sqlalchemy import delete as sa_delete
 from sqlalchemy.orm import Session
 
+from app.http_client import PER_PLAYER_RETRIES, resilient_get
 from app.models import LineupAggregate, ProjectedLineup
 
 logger = logging.getLogger(__name__)
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-REQUEST_TIMEOUT = 15
 
 # ── Team abbreviation normalization (shared pattern with other modules) ──
 
@@ -117,12 +116,11 @@ def _fetch_game_pks_for_date(target_date: date) -> list[dict]:
     date_str = target_date.isoformat()
     logger.info("Fetching game schedule for %s", date_str)
 
-    resp = requests.get(
+    resp = resilient_get(
         f"{MLB_API_BASE}/schedule",
         params={"date": date_str, "sportId": 1},
-        timeout=REQUEST_TIMEOUT,
+        label="lineup_schedule",
     )
-    resp.raise_for_status()
 
     games_info = []
     for date_entry in resp.json().get("dates", []):
@@ -155,8 +153,7 @@ def _fetch_lineup_from_game_feed(game_pk: int) -> dict[str, list[dict]]:
     """
     url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
     try:
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
+        resp = resilient_get(url, retries=PER_PLAYER_RETRIES, label="game_feed")
         data = resp.json()
     except Exception as e:
         logger.debug("Game feed unavailable for gamePk %d: %s", game_pk, e)
@@ -259,8 +256,10 @@ def _fetch_hitter_season_stats(player_id: int, season_year: int) -> dict | None:
     params = {"hydrate": f"stats(type=season,season={season_year},group=hitting)"}
 
     try:
-        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
+        resp = resilient_get(
+            url, params=params, retries=PER_PLAYER_RETRIES,
+            label="hitter_stats",
+        )
         data = resp.json()
     except Exception as e:
         logger.debug("Hitter stats fetch failed for player %d: %s", player_id, e)
