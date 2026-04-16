@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 
 from app.db import Base
 
@@ -81,6 +81,42 @@ class TeamContext(Base):
     bullpen_support_factor = Column(Float, nullable=True)
     run_environment_factor = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=_utcnow)
+
+
+class ProjectedLineup(Base):
+    __tablename__ = "projected_lineups"
+
+    id = Column(Integer, primary_key=True)
+    game_date = Column(Date, nullable=False, index=True)
+    game_id = Column(String, nullable=False, index=True)
+    team_code = Column(String, nullable=False, index=True)
+    batting_order = Column(Integer, nullable=False)
+    hitter_name = Column(String, nullable=False)
+    bats = Column(String, nullable=True)
+    confirmed = Column(Boolean, nullable=False, default=False)
+    source = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class LineupAggregate(Base):
+    __tablename__ = "lineup_aggregates"
+    __table_args__ = (
+        UniqueConstraint("game_date", "game_id", "team_code", "vs_hand",
+                         name="uq_lineup_agg_game_team_hand"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    game_date = Column(Date, nullable=False, index=True)
+    game_id = Column(String, nullable=False, index=True)
+    team_code = Column(String, nullable=False, index=True)
+    vs_hand = Column(String, nullable=False)
+    agg_k_tendency = Column(Float, nullable=True)
+    agg_bb_tendency = Column(Float, nullable=True)
+    agg_offense_strength = Column(Float, nullable=True)
+    agg_contact_quality = Column(Float, nullable=True)
+    hitter_count = Column(Integer, nullable=True)
+    source = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class AppRun(Base):

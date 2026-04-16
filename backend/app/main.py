@@ -8,11 +8,17 @@ from sqlalchemy import delete, func
 
 from app.baselines import get_pitcher_baselines_for_starters, upsert_pitcher_baselines
 from app.db import SessionLocal, init_db, prune_old_data
+from app.lineups import (
+    get_lineup_aggregate_map,
+    refresh_projected_lineups_and_aggregates,
+)
 from app.models import (
     AppRun,
     DailyPitcherProjection,
+    LineupAggregate,
     PitcherBaseline,
     ProbableStarter,
+    ProjectedLineup,
     TeamContext,
 )
 from app.probable_starters import get_probable_starters
@@ -53,12 +59,19 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     # 3. Load team context (auto-seeds defaults if missing)
     team_ctx_map = get_team_context_map(db, season_year)
 
-    # 4. Build projections using the formula engine with team context
+    # 4. Refresh lineups and load aggregates
+    try:
+        refresh_projected_lineups_and_aggregates(db, target_date, season_year)
+    except Exception as e:
+        logger.warning("Lineup refresh failed during slate build: %s — continuing without lineups", e)
+    lineup_agg_map = get_lineup_aggregate_map(db, target_date)
+
+    # 5. Build projections using the formula engine with team context + lineups
     projections, _debug = build_daily_projections_for_starters(
-        starters, baselines, team_ctx_map,
+        starters, baselines, team_ctx_map, lineup_agg_map,
     )
 
-    # 5. Clear existing rows for this date
+    # 6. Clear existing rows for this date
     del_ps = db.execute(
         delete(ProbableStarter).where(ProbableStarter.game_date == target_date)
     ).rowcount
@@ -67,7 +80,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
     ).rowcount
     logger.info("Cleared %d starters, %d projections for %s", del_ps, del_dp, target_date)
 
-    # 6. Insert starters
+    # 7. Insert starters
     for s in starters:
         db.add(ProbableStarter(
             game_date=s.game_date, game_id=s.game_id,
@@ -76,10 +89,10 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
             throws=s.throws, status=s.status, source=s.source,
         ))
 
-    # 7. Upsert baselines
+    # 8. Upsert baselines
     baselines_inserted = upsert_pitcher_baselines(db, baselines, season_year)
 
-    # 8. Insert projections
+    # 9. Insert projections
     for p in projections:
         db.add(DailyPitcherProjection(
             game_date=p.game_date, game_id=p.game_id,
@@ -104,6 +117,7 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
         "starters_inserted": len(starters),
         "baselines_inserted": baselines_inserted,
         "baseline_fallback_count": baseline_fallback_count,
+        "lineup_aggregates_loaded": len(lineup_agg_map),
         "projections_inserted": len(projections),
         "model_version": MODEL_VERSION,
         "cleared": {
@@ -348,6 +362,8 @@ def db_summary():
         pb_count = db.query(func.count(PitcherBaseline.id)).scalar()
         dp_count = db.query(func.count(DailyPitcherProjection.id)).scalar()
         tc_count = db.query(func.count(TeamContext.id)).scalar()
+        pl_count = db.query(func.count(ProjectedLineup.id)).scalar()
+        la_count = db.query(func.count(LineupAggregate.id)).scalar()
         ar_count = db.query(func.count(AppRun.id)).scalar()
 
         latest = db.query(func.max(DailyPitcherProjection.generated_at)).scalar()
@@ -357,6 +373,8 @@ def db_summary():
             "pitcher_baselines": pb_count,
             "daily_pitcher_projections": dp_count,
             "team_context": tc_count,
+            "projected_lineups": pl_count,
+            "lineup_aggregates": la_count,
             "app_runs": ar_count,
             "latest_projection": str(latest) if latest else None,
         }
@@ -641,9 +659,12 @@ def build_projections(
         # Load team context (auto-seeds defaults if missing)
         team_ctx_map = get_team_context_map(db, season_year)
 
-        # Run formula engine with team context
+        # Load lineup aggregates (if available)
+        lineup_agg_map = get_lineup_aggregate_map(db, target)
+
+        # Run formula engine with team context + lineup aggregates
         projections, debug_list = build_daily_projections_for_starters(
-            starters, baselines, team_ctx_map,
+            starters, baselines, team_ctx_map, lineup_agg_map,
         )
 
         # Clear existing projections for this date
@@ -670,12 +691,13 @@ def build_projections(
             details=f"date={target}, model={MODEL_VERSION}, "
                     f"starters={len(starters)}, baselines={len(baselines)}, "
                     f"team_ctx={len(team_ctx_map)}, "
+                    f"lineup_aggs={len(lineup_agg_map)}, "
                     f"projections={len(projections)}, cleared={del_count}",
         ))
         db.commit()
 
-        logger.info("Built %d formula projections for %s (cleared %d old, %d team contexts)",
-                     len(projections), target, del_count, len(team_ctx_map))
+        logger.info("Built %d formula projections for %s (cleared %d old, %d team contexts, %d lineup aggs)",
+                     len(projections), target, del_count, len(team_ctx_map), len(lineup_agg_map))
 
         return {
             "target_date": target.isoformat(),
@@ -683,6 +705,7 @@ def build_projections(
             "starters_loaded": len(starters),
             "baselines_loaded": len(baselines),
             "team_contexts_loaded": len(team_ctx_map),
+            "lineup_aggregates_loaded": len(lineup_agg_map),
             "projections_built": len(projections),
             "cleared": del_count,
         }
@@ -759,15 +782,19 @@ def projection_debug(
         # Load team context (auto-seeds defaults if missing)
         team_ctx_map = get_team_context_map(db, season_year)
 
+        # Load lineup aggregates (if available)
+        lineup_agg_map = get_lineup_aggregate_map(db, target)
+
         # Run engine (read-only — we only want the debug output)
         projections, debug_list = build_daily_projections_for_starters(
-            starters, baselines, team_ctx_map,
+            starters, baselines, team_ctx_map, lineup_agg_map,
         )
 
         return {
             "date": target.isoformat(),
             "model_version": MODEL_VERSION,
             "team_contexts_loaded": len(team_ctx_map),
+            "lineup_aggregates_loaded": len(lineup_agg_map),
             "pitcher_count": len(debug_list),
             "pitchers": debug_list,
         }
@@ -848,6 +875,128 @@ def admin_team_context(
                     "run_environment_factor": r.run_environment_factor,
                     "updated_at": str(r.updated_at) if r.updated_at else None,
                     "recently_updated": bool(r.updated_at and r.updated_at >= freshness_cutoff),
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/refresh-lineups")
+def admin_refresh_lineups(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+    season_year: int = Query(2026, description="Season year for hitter stats"),
+):
+    """Refresh projected lineups and aggregates from the MLB API.
+
+    Fetches batting orders from game feeds, pulls each hitter's season stats,
+    and builds per-team aggregates for lineup-aware projections.
+    Falls back to neutral aggregates if the API is unavailable.
+    """
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        summary = refresh_projected_lineups_and_aggregates(db, target, season_year)
+
+        db.add(AppRun(
+            run_type="lineup_refresh", status="success",
+            details=f"date={target}, slots={summary['lineup_slots_written']}, "
+                    f"aggregates={summary['aggregates_written']}, "
+                    f"source={summary['source']}, fallback={summary['fallback_used']}",
+        ))
+        db.commit()
+
+        logger.info("Lineup refresh: %s", summary)
+        return summary
+    except Exception as e:
+        db.rollback()
+        logger.error("Lineup refresh failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="lineup_refresh", status="error",
+                details=f"date={target}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/lineups")
+def admin_lineups(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+    team_code: Optional[str] = Query(None, description="Filter by team code"),
+):
+    """Return stored projected lineups for a date."""
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        query = db.query(ProjectedLineup).filter(ProjectedLineup.game_date == target)
+        if team_code:
+            query = query.filter(ProjectedLineup.team_code == team_code)
+
+        rows = query.order_by(
+            ProjectedLineup.team_code, ProjectedLineup.batting_order
+        ).all()
+
+        return {
+            "date": target.isoformat(),
+            "count": len(rows),
+            "lineups": [
+                {
+                    "team_code": r.team_code,
+                    "game_id": r.game_id,
+                    "batting_order": r.batting_order,
+                    "hitter_name": r.hitter_name,
+                    "bats": r.bats,
+                    "confirmed": r.confirmed,
+                    "source": r.source,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.get("/admin/lineup-aggregates")
+def admin_lineup_aggregates(
+    date: Optional[str] = Query(None, description="Date as YYYY-MM-DD, defaults to tomorrow"),
+    team_code: Optional[str] = Query(None, description="Filter by team code"),
+):
+    """Return stored lineup aggregates for a date."""
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        query = db.query(LineupAggregate).filter(LineupAggregate.game_date == target)
+        if team_code:
+            query = query.filter(LineupAggregate.team_code == team_code)
+
+        rows = query.order_by(LineupAggregate.team_code).all()
+
+        return {
+            "date": target.isoformat(),
+            "count": len(rows),
+            "aggregates": [
+                {
+                    "team_code": r.team_code,
+                    "game_id": r.game_id,
+                    "vs_hand": r.vs_hand,
+                    "agg_k_tendency": r.agg_k_tendency,
+                    "agg_bb_tendency": r.agg_bb_tendency,
+                    "agg_offense_strength": r.agg_offense_strength,
+                    "agg_contact_quality": r.agg_contact_quality,
+                    "hitter_count": r.hitter_count,
+                    "source": r.source,
+                    "created_at": str(r.created_at) if r.created_at else None,
                 }
                 for r in rows
             ],

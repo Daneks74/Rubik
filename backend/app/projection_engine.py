@@ -11,12 +11,13 @@ Model version: formula-v3-real-team-context
 import logging
 from dataclasses import dataclass
 
+from app.lineups import NEUTRAL_LINEUP_AGG
 from app.projection_builder import BaselineRecord, ProjectionRecord, StarterRecord
 from app.team_context import NEUTRAL_TEAM_CTX
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "formula-v3-real-team-context"
+MODEL_VERSION = "formula-v4-lineups"
 
 # ── MLB league-average defaults for missing baseline fields ──
 # Used when a pitcher's baseline is incomplete. These are roughly
@@ -60,6 +61,12 @@ class MatchupContext:
     bullpen_factor: float = 1.0
     # Run environment factor for blowup risk
     run_env_factor: float = 1.0
+    # Lineup-aggregate adjustments (from projected lineups)
+    lineup_k_factor: float = 1.0     # lineup K tendency
+    lineup_bb_factor: float = 1.0    # lineup BB tendency
+    lineup_offense_factor: float = 1.0  # lineup offensive strength
+    lineup_contact_factor: float = 1.0  # lineup contact quality
+    lineup_available: bool = False       # whether real lineup data was used
     # How many baseline fields used defaults (for confidence tracking)
     defaults_used: int = 0
 
@@ -68,38 +75,64 @@ def build_matchup_context(
     starter: StarterRecord,
     own_team_ctx: dict | None = None,
     opp_team_ctx: dict | None = None,
+    opp_lineup_agg: dict | None = None,
 ) -> MatchupContext:
-    """Build a matchup context from a starter record and team context.
+    """Build a matchup context from a starter record, team context, and lineup aggregates.
 
     Uses team-level heuristics to populate opponent difficulty multipliers,
     park/run-environment factors, and win-probability inputs.
-    Falls back to neutral (1.0) defaults when team context is unavailable.
+    When lineup aggregates are available, blends them with team-level factors
+    (60% lineup / 40% team) for more granular opponent adjustments.
+    Falls back to neutral (1.0) defaults when data is unavailable.
     """
     is_home = starter.home_away == "home"
     own = own_team_ctx or NEUTRAL_TEAM_CTX
     opp = opp_team_ctx or NEUTRAL_TEAM_CTX
+    lu = opp_lineup_agg or NEUTRAL_LINEUP_AGG
+    lineup_available = (
+        opp_lineup_agg is not None
+        and opp_lineup_agg.get("hitter_count", 0) >= 3
+    )
 
     # ── IP adjustment ──
     # Home pitchers go ~0.2 IP deeper on average.
     # Stronger opposing offense knocks pitchers out slightly earlier.
+    opp_offense = opp["offense_strength"]
+    if lineup_available:
+        # Blend lineup offense with team-level: 60/40
+        opp_offense = lu["agg_offense_strength"] * 0.6 + opp["offense_strength"] * 0.4
+
     ip_adj = 0.2 if is_home else 0.0
-    ip_adj += (1.0 - opp["offense_strength"]) * 0.3
+    ip_adj += (1.0 - opp_offense) * 0.3
     ip_adj = max(-0.3, min(0.4, ip_adj))
 
     # ── Opponent K factor ──
-    # Teams that strike out more are easier to K against.
-    opp_k_factor = opp["offense_k_tendency"]
+    # Teams/lineups that strike out more are easier to K against.
+    if lineup_available:
+        opp_k_factor = lu["agg_k_tendency"] * 0.6 + opp["offense_k_tendency"] * 0.4
+    else:
+        opp_k_factor = opp["offense_k_tendency"]
+
+    # ── Opponent BB factor ──
+    if lineup_available:
+        opp_bb_factor = lu["agg_bb_tendency"]
+    else:
+        opp_bb_factor = 1.0
 
     # ── Opponent hit factor ──
     # Stronger offenses produce more hits. Dampened to 50% of raw factor.
-    opp_hit_factor = 1.0 + (opp["offense_strength"] - 1.0) * 0.5
+    # When lineup data available, blend contact quality in.
+    if lineup_available:
+        blended_hit = lu["agg_contact_quality"] * 0.6 + opp["offense_strength"] * 0.4
+        opp_hit_factor = 1.0 + (blended_hit - 1.0) * 0.5
+    else:
+        opp_hit_factor = 1.0 + (opp["offense_strength"] - 1.0) * 0.5
 
     # ── Opponent ERA factor ──
     # Stronger offenses drive more earned runs. Dampened to 60%.
-    opp_era_factor = 1.0 + (opp["offense_strength"] - 1.0) * 0.6
+    opp_era_factor = 1.0 + (opp_offense - 1.0) * 0.6
 
     # ── Park / run environment ──
-    # Based on game location: pitcher's home park or opponent's park.
     if is_home:
         park_factor = own["run_environment_factor"]
         run_env_factor = own["run_environment_factor"]
@@ -108,25 +141,36 @@ def build_matchup_context(
         run_env_factor = opp["run_environment_factor"]
 
     # ── Team win rate ──
-    # Base 0.50, adjusted by home/away, own team run support, opponent offense.
     home_edge = 0.02 if is_home else -0.02
     own_support = (own["win_support_factor"] - 1.0) * 0.5
-    opp_penalty = (opp["offense_strength"] - 1.0) * 0.3
+    opp_penalty = (opp_offense - 1.0) * 0.3
     team_win_rate = max(0.35, min(0.65, 0.50 + home_edge + own_support - opp_penalty))
 
     # ── Bullpen factor ──
     bullpen_factor = own["bullpen_support_factor"]
 
+    # ── Lineup factors for debug/tracking ──
+    lineup_k = round(lu["agg_k_tendency"], 3) if lineup_available else 1.0
+    lineup_bb = round(lu["agg_bb_tendency"], 3) if lineup_available else 1.0
+    lineup_off = round(lu["agg_offense_strength"], 3) if lineup_available else 1.0
+    lineup_contact = round(lu["agg_contact_quality"], 3) if lineup_available else 1.0
+
     return MatchupContext(
         is_home=is_home,
         ip_adjustment=round(ip_adj, 3),
         opp_k_factor=round(opp_k_factor, 3),
+        opp_bb_factor=round(opp_bb_factor, 3),
         opp_hit_factor=round(opp_hit_factor, 3),
         opp_era_factor=round(opp_era_factor, 3),
         park_factor=round(park_factor, 3),
         team_win_rate=round(team_win_rate, 3),
         bullpen_factor=round(bullpen_factor, 3),
         run_env_factor=round(run_env_factor, 3),
+        lineup_k_factor=lineup_k,
+        lineup_bb_factor=lineup_bb,
+        lineup_offense_factor=lineup_off,
+        lineup_contact_factor=lineup_contact,
+        lineup_available=lineup_available,
     )
 
 
@@ -287,12 +331,18 @@ def project_pitcher_line(
             "is_home": ctx.is_home,
             "ip_adjustment": ctx.ip_adjustment,
             "opp_k_factor": ctx.opp_k_factor,
+            "opp_bb_factor": ctx.opp_bb_factor,
             "opp_hit_factor": ctx.opp_hit_factor,
             "opp_era_factor": ctx.opp_era_factor,
             "park_factor": ctx.park_factor,
             "team_win_rate": ctx.team_win_rate,
             "bullpen_factor": ctx.bullpen_factor,
             "run_env_factor": ctx.run_env_factor,
+            "lineup_available": ctx.lineup_available,
+            "lineup_k_factor": ctx.lineup_k_factor,
+            "lineup_bb_factor": ctx.lineup_bb_factor,
+            "lineup_offense_factor": ctx.lineup_offense_factor,
+            "lineup_contact_factor": ctx.lineup_contact_factor,
         },
         "intermediate": {
             "effective_era": round(effective_era, 3),
@@ -321,6 +371,7 @@ def build_daily_projections_for_starters(
     starters: list[StarterRecord],
     baselines: list[BaselineRecord],
     team_context_map: dict[str, dict] | None = None,
+    lineup_aggregate_map: dict[str, dict] | None = None,
     model_version: str = MODEL_VERSION,
 ) -> tuple[list[ProjectionRecord], list[dict]]:
     """Build projections for all starters that have a matching baseline.
@@ -329,6 +380,7 @@ def build_daily_projections_for_starters(
         starters: probable starters for the day
         baselines: pitcher baseline records
         team_context_map: optional dict keyed by team_code with context factors
+        lineup_aggregate_map: optional dict keyed by team_code with lineup aggregates
         model_version: model version string
 
     Returns:
@@ -336,11 +388,13 @@ def build_daily_projections_for_starters(
     """
     baseline_map = {bl.pitcher_name: bl for bl in baselines}
     tc_map = team_context_map or {}
+    lu_map = lineup_aggregate_map or {}
 
     projections: list[ProjectionRecord] = []
     debug_list: list[dict] = []
     matched = 0
     defaults_total = 0
+    lineup_used_count = 0
 
     for s in starters:
         bl = baseline_map.get(s.pitcher_name)
@@ -354,13 +408,27 @@ def build_daily_projections_for_starters(
         own_ctx = tc_map.get(s.pitcher_team)
         opp_ctx = tc_map.get(s.opponent_team)
 
-        ctx = build_matchup_context(s, own_ctx, opp_ctx)
+        # Look up lineup aggregates for opponent
+        opp_lineup = lu_map.get(s.opponent_team)
+
+        ctx = build_matchup_context(s, own_ctx, opp_ctx, opp_lineup)
         proj, debug = project_pitcher_line(s, bl, ctx, model_version)
 
-        # Add team context info to debug output
+        if ctx.lineup_available:
+            lineup_used_count += 1
+
+        # Add team context and lineup info to debug output
         debug["team_context"] = {
             "own_team": own_ctx,
             "opp_team": opp_ctx,
+        }
+        debug["lineup_aggregate"] = {
+            "opp_lineup": opp_lineup,
+            "lineup_available": ctx.lineup_available,
+            "lineup_k_factor": ctx.lineup_k_factor,
+            "lineup_bb_factor": ctx.lineup_bb_factor,
+            "lineup_offense_factor": ctx.lineup_offense_factor,
+            "lineup_contact_factor": ctx.lineup_contact_factor,
         }
 
         defaults_total += ctx.defaults_used
@@ -389,9 +457,11 @@ def build_daily_projections_for_starters(
     projections.sort(key=lambda p: p.stream_score, reverse=True)
 
     team_ctx_status = f"{len(tc_map)} teams" if tc_map else "none (neutral)"
+    lineup_status = f"{lineup_used_count}/{matched} with lineups" if lu_map else "none"
     logger.info(
         "Projections built: %d/%d starters matched, %d total defaults used, "
-        "team_context=%s, model=%s",
-        matched, len(starters), defaults_total, team_ctx_status, model_version,
+        "team_context=%s, lineups=%s, model=%s",
+        matched, len(starters), defaults_total, team_ctx_status, lineup_status,
+        model_version,
     )
     return projections, debug_list
