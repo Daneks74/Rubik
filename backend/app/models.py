@@ -128,6 +128,24 @@ class LineupAggregate(Base):
     created_at = Column(DateTime, default=_utcnow)
 
 
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+
+    id = Column(Integer, primary_key=True)
+    start_date = Column(Date, nullable=False, index=True)
+    end_date = Column(Date, nullable=False, index=True)
+    model_version = Column(String, nullable=False, index=True)
+    run_status = Column(String, nullable=False)
+    starter_count = Column(Integer, nullable=True)
+    mae_k = Column(Float, nullable=True)
+    mae_era = Column(Float, nullable=True)
+    mae_whip = Column(Float, nullable=True)
+    brier_win = Column(Float, nullable=True)
+    top_streamer_hit_rate = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+
+
 class AppRun(Base):
     __tablename__ = "app_runs"
 

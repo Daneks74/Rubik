@@ -6,7 +6,15 @@ from typing import Optional
 from fastapi import FastAPI, Query
 from sqlalchemy import delete, func
 
+from app.backtesting import (
+    fetch_actual_starter_results,
+    rebuild_historical_projections_for_date,
+    run_backtest,
+    score_projection_set,
+    score_streamer_rank_quality,
+)
 from app.baselines import get_pitcher_baselines_for_starters, upsert_pitcher_baselines
+from app.calibration import evaluate_percentile_coverage, evaluate_win_probability_calibration
 from app.db import SessionLocal, init_db, prune_old_data
 from app.lineups import (
     get_lineup_aggregate_map,
@@ -14,6 +22,7 @@ from app.lineups import (
 )
 from app.models import (
     AppRun,
+    BacktestRun,
     DailyPitcherProjection,
     LineupAggregate,
     PitcherBaseline,
@@ -377,6 +386,7 @@ def db_summary():
         tc_count = db.query(func.count(TeamContext.id)).scalar()
         pl_count = db.query(func.count(ProjectedLineup.id)).scalar()
         la_count = db.query(func.count(LineupAggregate.id)).scalar()
+        bt_count = db.query(func.count(BacktestRun.id)).scalar()
         ar_count = db.query(func.count(AppRun.id)).scalar()
 
         latest = db.query(func.max(DailyPitcherProjection.generated_at)).scalar()
@@ -388,6 +398,7 @@ def db_summary():
             "team_context": tc_count,
             "projected_lineups": pl_count,
             "lineup_aggregates": la_count,
+            "backtest_runs": bt_count,
             "app_runs": ar_count,
             "latest_projection": str(latest) if latest else None,
         }
@@ -1093,6 +1104,210 @@ def admin_lineup_aggregates(
                 }
                 for r in rows
             ],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/admin/run-backtest")
+def admin_run_backtest(
+    start_date: str = Query(..., description="Start date as YYYY-MM-DD"),
+    end_date: str = Query(..., description="End date as YYYY-MM-DD"),
+    season_year: Optional[int] = Query(None, description="Season year (defaults to start_date's year)"),
+):
+    """Run a backtest across a date range.
+
+    Rebuilds historical projections for each date, fetches actual starter
+    results from the MLB API, and scores the comparison with MAE, Brier score,
+    and streamer ranking metrics. Writes one summary row to backtest_runs.
+    """
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+
+    if end < start:
+        return {"error": "end_date must be >= start_date"}
+    if (end - start).days > 30:
+        return {"error": "Maximum backtest range is 30 days"}
+
+    db = SessionLocal()
+    try:
+        summary = run_backtest(db, start, end, season_year)
+
+        db.add(AppRun(
+            run_type="backtest", status="success",
+            details=f"range={start}..{end}, dates_processed={summary.dates_processed}, "
+                    f"matched={summary.total_matched}, mae_k={summary.mae_k}, "
+                    f"brier={summary.brier_win}, model={summary.model_version}",
+        ))
+        db.commit()
+
+        return {
+            "start_date": summary.start_date.isoformat(),
+            "end_date": summary.end_date.isoformat(),
+            "dates_processed": summary.dates_processed,
+            "dates_failed": summary.dates_failed,
+            "total_starters": summary.total_starters,
+            "total_matched": summary.total_matched,
+            "mae_k": summary.mae_k,
+            "mae_era": summary.mae_era,
+            "mae_whip": summary.mae_whip,
+            "brier_win": summary.brier_win,
+            "top_streamer_hit_rate": summary.top_streamer_hit_rate,
+            "model_version": summary.model_version,
+            "failed_dates": summary.failed_dates,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("Backtest failed: %s", e)
+
+        try:
+            db.add(AppRun(
+                run_type="backtest", status="error",
+                details=f"range={start}..{end}, error={e}",
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/admin/backtest-runs")
+def admin_backtest_runs(
+    limit: int = Query(20, ge=1, le=100, description="Max rows to return"),
+):
+    """Return recent backtest_runs rows, newest first."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(BacktestRun)
+            .order_by(BacktestRun.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        return {
+            "count": len(rows),
+            "runs": [
+                {
+                    "id": r.id,
+                    "start_date": r.start_date.isoformat() if r.start_date else None,
+                    "end_date": r.end_date.isoformat() if r.end_date else None,
+                    "model_version": r.model_version,
+                    "run_status": r.run_status,
+                    "starter_count": r.starter_count,
+                    "mae_k": r.mae_k,
+                    "mae_era": r.mae_era,
+                    "mae_whip": r.mae_whip,
+                    "brier_win": r.brier_win,
+                    "top_streamer_hit_rate": r.top_streamer_hit_rate,
+                    "notes": r.notes,
+                    "created_at": str(r.created_at) if r.created_at else None,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@app.get("/admin/backtest-debug")
+def admin_backtest_debug(
+    start_date: Optional[str] = Query(None, description="Start date (defaults to 7 days ago)"),
+    end_date: Optional[str] = Query(None, description="End date (defaults to yesterday)"),
+    season_year: Optional[int] = Query(None, description="Season year (defaults to start_date's year)"),
+):
+    """Detailed backtest debug: scoring metrics, calibration buckets,
+    percentile coverage, and ranking quality for a date range.
+
+    Does NOT write to DB — runs analysis in read-only mode. Rebuilds
+    projections and fetches actuals on the fly for each date.
+    """
+    end = _parse_date(end_date) if end_date else date.today() - timedelta(days=1)
+    start = _parse_date(start_date) if start_date else end - timedelta(days=6)
+
+    if end < start:
+        return {"error": "end_date must be >= start_date"}
+    if (end - start).days > 14:
+        return {"error": "Maximum debug range is 14 days"}
+
+    db = SessionLocal()
+    try:
+        all_projected = []
+        all_actuals = []
+        date_summaries = []
+
+        current = start
+        while current <= end:
+            date_str = current.isoformat()
+            try:
+                projections = rebuild_historical_projections_for_date(
+                    db, current, season_year,
+                )
+                actuals = fetch_actual_starter_results(current)
+
+                if projections and actuals:
+                    scores = score_projection_set(projections, actuals)
+                    streamer = score_streamer_rank_quality(projections, actuals)
+
+                    all_projected.extend(projections)
+                    all_actuals.extend(actuals)
+
+                    date_summaries.append({
+                        "date": date_str,
+                        "projected_count": len(projections),
+                        "actual_count": len(actuals),
+                        "matched": scores.matched_count if scores else 0,
+                        "mae_k": scores.mae_k if scores else None,
+                        "mae_era": scores.mae_era if scores else None,
+                        "mae_whip": scores.mae_whip if scores else None,
+                        "brier_win": scores.brier_win if scores else None,
+                        "top_streamer_hit_rate": streamer,
+                    })
+                else:
+                    date_summaries.append({
+                        "date": date_str,
+                        "projected_count": len(projections),
+                        "actual_count": len(actuals),
+                        "matched": 0,
+                        "error": "insufficient data",
+                    })
+            except Exception as e:
+                logger.warning("Backtest debug failed for %s: %s", date_str, e)
+                date_summaries.append({
+                    "date": date_str,
+                    "error": str(e),
+                })
+
+            current += timedelta(days=1)
+
+        # Aggregate calibration and coverage across all dates
+        calibration = evaluate_win_probability_calibration(all_projected, all_actuals)
+        coverage = evaluate_percentile_coverage(all_projected, all_actuals)
+
+        # Aggregate scoring
+        agg_scores = score_projection_set(all_projected, all_actuals)
+        agg_streamer = score_streamer_rank_quality(all_projected, all_actuals)
+
+        return {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "model_version": MODEL_VERSION,
+            "dates": date_summaries,
+            "aggregate": {
+                "total_projected": len(all_projected),
+                "total_actuals": len(all_actuals),
+                "matched": agg_scores.matched_count if agg_scores else 0,
+                "mae_k": agg_scores.mae_k if agg_scores else None,
+                "mae_era": agg_scores.mae_era if agg_scores else None,
+                "mae_whip": agg_scores.mae_whip if agg_scores else None,
+                "brier_win": agg_scores.brier_win if agg_scores else None,
+                "top_streamer_hit_rate": agg_streamer,
+            },
+            "calibration": calibration,
+            "percentile_coverage": coverage,
         }
     finally:
         db.close()

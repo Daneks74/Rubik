@@ -210,7 +210,22 @@ def _resolve_baseline(bl: BaselineRecord) -> tuple[dict, int]:
     return resolved, defaults_used
 
 
-# ── Stream score ──
+# ── Stream score weights (centralized for tuning) ──
+
+STREAM_WEIGHTS = {
+    "k_multiplier": 3.2,        # pts per projected K (capped at 28)
+    "k_cap": 28.0,              # max K pts
+    "win_multiplier": 25.0,     # pts per 1.0 win probability
+    "era_max_pts": 22.0,        # max ERA quality pts
+    "era_baseline": 5.50,       # ERA at which pts = 0
+    "whip_max_pts": 12.0,       # max WHIP quality pts
+    "whip_baseline": 1.60,      # WHIP at which pts = 0
+    "ip_multiplier": 2.0,       # pts per IP above 4.0
+    "ip_cap": 8.0,              # max IP bonus pts
+    "ip_floor": 4.0,            # IP below which no bonus
+    "blowup_multiplier": 28.0,  # penalty pts per 1.0 blowup probability
+}
+
 
 def _compute_stream_score(
     proj_k: float,
@@ -219,18 +234,21 @@ def _compute_stream_score(
     proj_whip: float,
     proj_ip: float,
     blowup: float,
+    weights: dict | None = None,
 ) -> float:
     """Compute fantasy streaming score (0-100).
 
     Rewards: strikeouts, win probability, low ERA, low WHIP, innings depth.
     Penalizes: blowup probability.
+    Uses STREAM_WEIGHTS by default; pass custom weights dict for tuning.
     """
-    k_pts = min(28, proj_k * 3.2)                             # 0-28: raw K value
-    win_pts = win_prob * 25                                     # 0-17.5: win upside
-    era_pts = max(0, (5.50 - proj_era) / 5.50) * 22            # 0-22: ERA quality
-    whip_pts = max(0, (1.60 - proj_whip) / 1.60) * 12          # 0-12: WHIP quality
-    ip_pts = max(0, min(8, (proj_ip - 4.0) * 2.0))             # 0-8: length bonus
-    blowup_pen = blowup * 28                                    # 0-14: blowup penalty
+    w = weights or STREAM_WEIGHTS
+    k_pts = min(w["k_cap"], proj_k * w["k_multiplier"])
+    win_pts = win_prob * w["win_multiplier"]
+    era_pts = max(0, (w["era_baseline"] - proj_era) / w["era_baseline"]) * w["era_max_pts"]
+    whip_pts = max(0, (w["whip_baseline"] - proj_whip) / w["whip_baseline"]) * w["whip_max_pts"]
+    ip_pts = max(0, min(w["ip_cap"], (proj_ip - w["ip_floor"]) * w["ip_multiplier"]))
+    blowup_pen = blowup * w["blowup_multiplier"]
     return round(max(0, min(100, k_pts + win_pts + era_pts + whip_pts + ip_pts - blowup_pen)), 1)
 
 
@@ -309,9 +327,20 @@ def project_pitcher_line(
     )), 2)
 
     # ── Confidence ──
-    if defaults_used == 0 and bl["xera"] is not None:
-        confidence = "high"
+    # Score 0-4 based on data completeness; map to high/medium/low.
+    conf_score = 0
+    if defaults_used == 0:
+        conf_score += 2          # full baseline data
     elif defaults_used <= 1:
+        conf_score += 1          # mostly complete baseline
+    if bl["xera"] is not None:
+        conf_score += 1          # has xERA for ERA blending
+    if ctx.lineup_available:
+        conf_score += 1          # real lineup data available
+
+    if conf_score >= 3:
+        confidence = "high"
+    elif conf_score >= 1:
         confidence = "medium"
     else:
         confidence = "low"
@@ -474,6 +503,9 @@ def build_daily_projections_for_starters(
                 s.pitcher_name, e,
             )
             sim_fallback_count += 1
+            # Downgrade confidence if simulation failed and was "high"
+            if proj.confidence == "high":
+                proj.confidence = "medium"
 
         # Add team context and lineup info to debug output
         debug["team_context"] = {
