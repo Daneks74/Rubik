@@ -1,23 +1,29 @@
 """
-Formula-based projection engine — produces daily pitcher projections from
-stored baselines, lightweight team context, and matchup heuristics.
+Formula-based projection engine with Monte Carlo simulation — produces daily
+pitcher projections from stored baselines, lightweight team context, matchup
+heuristics, and a bounded simulation layer for probabilistic outputs.
 
-Designed for modularity: matchup context, projection formulas, and scoring
-are all isolated so they can be upgraded independently with opponent lineups,
-park factors, bullpen quality, and simulation later.
+Designed for modularity: matchup context, projection formulas, simulation,
+and scoring are all isolated so they can be upgraded independently.
 
-Model version: formula-v3-real-team-context
+Model version: formula-v5-sim
 """
 import logging
 from dataclasses import dataclass
 
 from app.lineups import NEUTRAL_LINEUP_AGG
 from app.projection_builder import BaselineRecord, ProjectionRecord, StarterRecord
+from app.simulation import (
+    DEFAULT_SIM_COUNT,
+    SimulationSummary,
+    apply_simulation_to_projection,
+    simulate_pitcher_outcomes,
+)
 from app.team_context import NEUTRAL_TEAM_CTX
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "formula-v4-lineups"
+MODEL_VERSION = "formula-v5-sim"
 
 # ── MLB league-average defaults for missing baseline fields ──
 # Used when a pitcher's baseline is incomplete. These are roughly
@@ -204,6 +210,30 @@ def _resolve_baseline(bl: BaselineRecord) -> tuple[dict, int]:
     return resolved, defaults_used
 
 
+# ── Stream score ──
+
+def _compute_stream_score(
+    proj_k: float,
+    win_prob: float,
+    proj_era: float,
+    proj_whip: float,
+    proj_ip: float,
+    blowup: float,
+) -> float:
+    """Compute fantasy streaming score (0-100).
+
+    Rewards: strikeouts, win probability, low ERA, low WHIP, innings depth.
+    Penalizes: blowup probability.
+    """
+    k_pts = min(28, proj_k * 3.2)                             # 0-28: raw K value
+    win_pts = win_prob * 25                                     # 0-17.5: win upside
+    era_pts = max(0, (5.50 - proj_era) / 5.50) * 22            # 0-22: ERA quality
+    whip_pts = max(0, (1.60 - proj_whip) / 1.60) * 12          # 0-12: WHIP quality
+    ip_pts = max(0, min(8, (proj_ip - 4.0) * 2.0))             # 0-8: length bonus
+    blowup_pen = blowup * 28                                    # 0-14: blowup penalty
+    return round(max(0, min(100, k_pts + win_pts + era_pts + whip_pts + ip_pts - blowup_pen)), 1)
+
+
 # ── Core projection formula ──
 
 def project_pitcher_line(
@@ -287,15 +317,8 @@ def project_pitcher_line(
         confidence = "low"
 
     # ── Stream score (0-100) ──
-    # Composite score for fantasy streaming: rewards K, win prob, low ERA;
-    # penalizes blowup risk, high WHIP.
-    k_pts = min(28, proj_k * 3.2)                             # 0-28: raw K value
-    win_pts = win_prob * 25                                     # 0-17.5: win upside
-    era_pts = max(0, (5.50 - proj_era) / 5.50) * 22            # 0-22: ERA quality
-    whip_pts = max(0, (1.60 - proj_whip) / 1.60) * 12          # 0-12: WHIP quality
-    ip_pts = max(0, min(8, (proj_ip - 4.0) * 2.0))             # 0-8: length bonus
-    blowup_pen = blowup * 28                                    # 0-14: blowup penalty
-    stream = round(max(0, min(100, k_pts + win_pts + era_pts + whip_pts + ip_pts - blowup_pen)), 1)
+    # Initial deterministic score; will be recomputed after simulation.
+    stream = _compute_stream_score(proj_k, win_prob, proj_era, proj_whip, proj_ip, blowup)
 
     projection = ProjectionRecord(
         game_date=starter.game_date,
@@ -353,12 +376,12 @@ def project_pitcher_line(
             "opp_risk": round(opp_risk, 4),
         },
         "score_breakdown": {
-            "k_pts": round(k_pts, 1),
-            "win_pts": round(win_pts, 1),
-            "era_pts": round(era_pts, 1),
-            "whip_pts": round(whip_pts, 1),
-            "ip_pts": round(ip_pts, 1),
-            "blowup_penalty": round(blowup_pen, 1),
+            "k_pts": round(min(28, proj_k * 3.2), 1),
+            "win_pts": round(win_prob * 25, 1),
+            "era_pts": round(max(0, (5.50 - proj_era) / 5.50) * 22, 1),
+            "whip_pts": round(max(0, (1.60 - proj_whip) / 1.60) * 12, 1),
+            "ip_pts": round(max(0, min(8, (proj_ip - 4.0) * 2.0)), 1),
+            "blowup_penalty": round(blowup * 28, 1),
         },
     }
 
@@ -373,8 +396,18 @@ def build_daily_projections_for_starters(
     team_context_map: dict[str, dict] | None = None,
     lineup_aggregate_map: dict[str, dict] | None = None,
     model_version: str = MODEL_VERSION,
+    sim_count: int = DEFAULT_SIM_COUNT,
 ) -> tuple[list[ProjectionRecord], list[dict]]:
     """Build projections for all starters that have a matching baseline.
+
+    For each pitcher:
+      1. Builds deterministic projection from formula engine
+      2. Runs lightweight Monte Carlo simulation
+      3. Applies sim results (refined win/blowup probs + percentiles)
+      4. Recomputes stream_score with sim-refined values
+
+    If simulation fails for a pitcher, the deterministic outputs are kept
+    and percentile fields are left null.
 
     Args:
         starters: probable starters for the day
@@ -382,6 +415,7 @@ def build_daily_projections_for_starters(
         team_context_map: optional dict keyed by team_code with context factors
         lineup_aggregate_map: optional dict keyed by team_code with lineup aggregates
         model_version: model version string
+        sim_count: number of Monte Carlo trials per pitcher
 
     Returns:
         (projections sorted by stream_score desc, debug_info list)
@@ -395,6 +429,10 @@ def build_daily_projections_for_starters(
     matched = 0
     defaults_total = 0
     lineup_used_count = 0
+    sim_success_count = 0
+    sim_fallback_count = 0
+
+    logger.info("Starting projection build with simulation (sim_count=%d)", sim_count)
 
     for s in starters:
         bl = baseline_map.get(s.pitcher_name)
@@ -417,6 +455,26 @@ def build_daily_projections_for_starters(
         if ctx.lineup_available:
             lineup_used_count += 1
 
+        # ── Run simulation ──
+        sim_summary: SimulationSummary | None = None
+        try:
+            sim_summary = simulate_pitcher_outcomes(proj, ctx, sim_count=sim_count)
+            apply_simulation_to_projection(proj, sim_summary)
+
+            # Recompute stream_score with sim-refined win_prob and blowup_prob
+            proj.stream_score = _compute_stream_score(
+                proj.projected_k, proj.win_probability,
+                proj.projected_era, proj.projected_whip,
+                proj.projected_ip, proj.blowup_probability,
+            )
+            sim_success_count += 1
+        except Exception as e:
+            logger.warning(
+                "Simulation failed for %s — keeping deterministic outputs: %s",
+                s.pitcher_name, e,
+            )
+            sim_fallback_count += 1
+
         # Add team context and lineup info to debug output
         debug["team_context"] = {
             "own_team": own_ctx,
@@ -430,6 +488,25 @@ def build_daily_projections_for_starters(
             "lineup_offense_factor": ctx.lineup_offense_factor,
             "lineup_contact_factor": ctx.lineup_contact_factor,
         }
+
+        # Add simulation info to debug output
+        if sim_summary:
+            debug["simulation"] = {
+                "sim_count": sim_summary.sim_count,
+                "win_probability": sim_summary.win_probability,
+                "blowup_probability": sim_summary.blowup_probability,
+                "k_p20": sim_summary.k_p20,
+                "k_p50": sim_summary.k_p50,
+                "k_p80": sim_summary.k_p80,
+                "era_p20": sim_summary.era_p20,
+                "era_p50": sim_summary.era_p50,
+                "era_p80": sim_summary.era_p80,
+                "whip_p20": sim_summary.whip_p20,
+                "whip_p50": sim_summary.whip_p50,
+                "whip_p80": sim_summary.whip_p80,
+            }
+        else:
+            debug["simulation"] = {"status": "fallback_to_deterministic"}
 
         defaults_total += ctx.defaults_used
         projections.append(proj)
@@ -451,6 +528,15 @@ def build_daily_projections_for_starters(
                 "blowup_probability": proj.blowup_probability,
                 "confidence": proj.confidence,
                 "stream_score": proj.stream_score,
+                "k_p20": proj.k_p20,
+                "k_p50": proj.k_p50,
+                "k_p80": proj.k_p80,
+                "era_p20": proj.era_p20,
+                "era_p50": proj.era_p50,
+                "era_p80": proj.era_p80,
+                "whip_p20": proj.whip_p20,
+                "whip_p50": proj.whip_p50,
+                "whip_p80": proj.whip_p80,
             },
         })
 
@@ -460,8 +546,11 @@ def build_daily_projections_for_starters(
     lineup_status = f"{lineup_used_count}/{matched} with lineups" if lu_map else "none"
     logger.info(
         "Projections built: %d/%d starters matched, %d total defaults used, "
-        "team_context=%s, lineups=%s, model=%s",
+        "team_context=%s, lineups=%s, sim=%d/%d success, model=%s",
         matched, len(starters), defaults_total, team_ctx_status, lineup_status,
-        model_version,
+        sim_success_count, matched, model_version,
     )
+    if sim_fallback_count > 0:
+        logger.warning("Simulation fallback used for %d/%d pitchers", sim_fallback_count, matched)
+
     return projections, debug_list

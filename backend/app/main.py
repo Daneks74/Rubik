@@ -103,6 +103,9 @@ def _write_slate_to_db(db, target_date: date, season_year: int = 2026) -> dict:
             projected_era=p.projected_era, projected_whip=p.projected_whip,
             win_probability=p.win_probability, blowup_probability=p.blowup_probability,
             confidence=p.confidence, stream_score=p.stream_score,
+            k_p20=p.k_p20, k_p50=p.k_p50, k_p80=p.k_p80,
+            era_p20=p.era_p20, era_p50=p.era_p50, era_p80=p.era_p80,
+            whip_p20=p.whip_p20, whip_p50=p.whip_p50, whip_p80=p.whip_p80,
             model_version=p.model_version,
         ))
 
@@ -214,7 +217,7 @@ def _refresh_baselines_to_db(db, target_date: date, season_year: int = 2026) -> 
 
 def _projection_row_to_dict(row: DailyPitcherProjection, starter: ProbableStarter | None = None) -> dict:
     """Convert a projection ORM row to a clean API dict."""
-    return {
+    d = {
         "pitcher_name": row.pitcher_name,
         "pitcher_team": row.pitcher_team,
         "opponent_team": row.opponent_team,
@@ -230,9 +233,19 @@ def _projection_row_to_dict(row: DailyPitcherProjection, starter: ProbableStarte
         "blowup_probability": row.blowup_probability,
         "confidence": row.confidence,
         "stream_score": row.stream_score,
+        "k_p20": row.k_p20,
+        "k_p50": row.k_p50,
+        "k_p80": row.k_p80,
+        "era_p20": row.era_p20,
+        "era_p50": row.era_p50,
+        "era_p80": row.era_p80,
+        "whip_p20": row.whip_p20,
+        "whip_p50": row.whip_p50,
+        "whip_p80": row.whip_p80,
         "model_version": row.model_version,
         "generated_at": str(row.generated_at) if row.generated_at else None,
     }
+    return d
 
 
 # ── Lifespan ──
@@ -683,8 +696,14 @@ def build_projections(
                 projected_era=p.projected_era, projected_whip=p.projected_whip,
                 win_probability=p.win_probability, blowup_probability=p.blowup_probability,
                 confidence=p.confidence, stream_score=p.stream_score,
+                k_p20=p.k_p20, k_p50=p.k_p50, k_p80=p.k_p80,
+                era_p20=p.era_p20, era_p50=p.era_p50, era_p80=p.era_p80,
+                whip_p20=p.whip_p20, whip_p50=p.whip_p50, whip_p80=p.whip_p80,
                 model_version=p.model_version,
             ))
+
+        # Count how many projections have simulation data
+        sim_count = sum(1 for p in projections if p.k_p50 is not None)
 
         db.add(AppRun(
             run_type="projection_build", status="success",
@@ -692,12 +711,13 @@ def build_projections(
                     f"starters={len(starters)}, baselines={len(baselines)}, "
                     f"team_ctx={len(team_ctx_map)}, "
                     f"lineup_aggs={len(lineup_agg_map)}, "
-                    f"projections={len(projections)}, cleared={del_count}",
+                    f"projections={len(projections)}, simulated={sim_count}, "
+                    f"cleared={del_count}",
         ))
         db.commit()
 
-        logger.info("Built %d formula projections for %s (cleared %d old, %d team contexts, %d lineup aggs)",
-                     len(projections), target, del_count, len(team_ctx_map), len(lineup_agg_map))
+        logger.info("Built %d projections for %s (%d simulated, cleared %d old)",
+                     len(projections), target, sim_count, del_count)
 
         return {
             "target_date": target.isoformat(),
@@ -707,6 +727,7 @@ def build_projections(
             "team_contexts_loaded": len(team_ctx_map),
             "lineup_aggregates_loaded": len(lineup_agg_map),
             "projections_built": len(projections),
+            "simulations_completed": sim_count,
             "cleared": del_count,
         }
     except Exception as e:
@@ -797,6 +818,78 @@ def projection_debug(
             "lineup_aggregates_loaded": len(lineup_agg_map),
             "pitcher_count": len(debug_list),
             "pitchers": debug_list,
+        }
+    finally:
+        db.close()
+
+
+@app.get("/admin/simulation-debug")
+def simulation_debug(
+    date: Optional[str] = Query(None, description="Target date as YYYY-MM-DD, defaults to tomorrow"),
+    pitcher_name: Optional[str] = Query(None, description="Filter to a single pitcher"),
+):
+    """Return simulation debug info for each pitcher — deterministic values,
+    simulation summary, percentiles, and refined probabilities.
+
+    Does NOT write to DB; reads stored projections with their simulation outputs.
+    """
+    target = _parse_date(date) if date else _tomorrow()
+
+    db = SessionLocal()
+    try:
+        query = (
+            db.query(DailyPitcherProjection)
+            .filter(DailyPitcherProjection.game_date == target)
+        )
+        if pitcher_name:
+            query = query.filter(DailyPitcherProjection.pitcher_name == pitcher_name)
+
+        rows = query.order_by(DailyPitcherProjection.stream_score.desc()).all()
+
+        if not rows:
+            return {"error": f"No projections for {target}", "date": target.isoformat()}
+
+        pitchers = []
+        for r in rows:
+            has_sim = r.k_p50 is not None
+            entry = {
+                "pitcher_name": r.pitcher_name,
+                "pitcher_team": r.pitcher_team,
+                "opponent_team": r.opponent_team,
+                "deterministic": {
+                    "projected_ip": r.projected_ip,
+                    "projected_k": r.projected_k,
+                    "projected_bb": r.projected_bb,
+                    "projected_h": r.projected_h,
+                    "projected_er": r.projected_er,
+                    "projected_era": r.projected_era,
+                    "projected_whip": r.projected_whip,
+                },
+                "simulation": {
+                    "available": has_sim,
+                    "win_probability": r.win_probability,
+                    "blowup_probability": r.blowup_probability,
+                    "k_p20": r.k_p20,
+                    "k_p50": r.k_p50,
+                    "k_p80": r.k_p80,
+                    "era_p20": r.era_p20,
+                    "era_p50": r.era_p50,
+                    "era_p80": r.era_p80,
+                    "whip_p20": r.whip_p20,
+                    "whip_p50": r.whip_p50,
+                    "whip_p80": r.whip_p80,
+                },
+                "confidence": r.confidence,
+                "stream_score": r.stream_score,
+                "model_version": r.model_version,
+            }
+            pitchers.append(entry)
+
+        return {
+            "date": target.isoformat(),
+            "model_version": MODEL_VERSION,
+            "pitcher_count": len(pitchers),
+            "pitchers": pitchers,
         }
     finally:
         db.close()

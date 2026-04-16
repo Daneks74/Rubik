@@ -87,6 +87,15 @@ class ProjectionRecord:
     blowup_probability: float
     confidence: str
     stream_score: float
+    k_p20: float | None = None
+    k_p50: float | None = None
+    k_p80: float | None = None
+    era_p20: float | None = None
+    era_p50: float | None = None
+    era_p80: float | None = None
+    whip_p20: float | None = None
+    whip_p50: float | None = None
+    whip_p80: float | None = None
     model_version: str = field(default=MODEL_VERSION)
 
 
