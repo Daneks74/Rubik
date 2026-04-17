@@ -1,5 +1,7 @@
 // ── Fantasy Baseball Dashboard ──
 
+const WIZARD_API_BASE = document.querySelector('meta[name="wizard-api-base"]')?.content || '';
+
 const state = {
   currentPage: 'sp-picker',
   hasEspn: false,
@@ -16,6 +18,10 @@ const state = {
   faStatView: 'current',
   selectedTeam: null,
   projSource: 'ESPN',
+  streamersData: null,
+  backendStatus: null,
+  streamerFilter: 'all',
+  expandedStreamer: null,
 };
 
 // ── API helpers ──
@@ -32,6 +38,24 @@ async function api(url) {
 
 async function apiPost(url) {
   const resp = await fetch(url, { method: 'POST' });
+  return resp.json();
+}
+
+async function wizardApi(path) {
+  const resp = await fetch(`${WIZARD_API_BASE}${path}`);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || body.error || `Backend error: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+async function wizardApiPost(path) {
+  const resp = await fetch(`${WIZARD_API_BASE}${path}`, { method: 'POST' });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || body.error || `Backend error: ${resp.status}`);
+  }
   return resp.json();
 }
 
@@ -55,6 +79,7 @@ async function renderPage() {
   try {
     switch (state.currentPage) {
       case 'sp-picker': await renderSPPicker(content); break;
+      case 'streamers': await renderStreamers(content); break;
       case 'rankings': await renderRankings(content); break;
       case 'my-roster': await renderMyRoster(content); break;
       case 'free-agents': await renderFreeAgents(content); break;
@@ -181,6 +206,286 @@ async function renderSPPicker(el) {
   }
 
   el.innerHTML = html;
+}
+
+// ── Streamers ──
+
+async function renderStreamers(el) {
+  const [streamersRes, statusRes] = await Promise.allSettled([
+    state.streamersData ? Promise.resolve(state.streamersData) : wizardApi('/streamers/tomorrow'),
+    wizardApi('/admin/refresh-status'),
+  ]);
+
+  if (streamersRes.status === 'rejected') {
+    el.innerHTML = `<div class="page-header"><h2>Streamers</h2><p>Tomorrow's streaming pitchers</p></div>
+      <div class="empty-state"><p style="color:var(--red)">Failed to load streamers</p>
+      <p style="font-size:12px;margin-top:8px;color:var(--text-secondary)">${streamersRes.reason?.message || 'Backend unreachable'}</p>
+      <button class="refresh-btn" style="width:auto;padding:8px 20px;margin-top:16px" onclick="refreshStreamers()">Retry</button></div>`;
+    return;
+  }
+
+  const data = streamersRes.value;
+  state.streamersData = data;
+  const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+  state.backendStatus = status;
+
+  const pitchers = data.streamers || [];
+  const tags = new Set();
+  pitchers.forEach(p => (p.tags || []).forEach(t => tags.add(t)));
+
+  const filtered = state.streamerFilter === 'all'
+    ? pitchers
+    : pitchers.filter(p => (p.tags || []).includes(state.streamerFilter));
+
+  let html = `
+    <div class="page-header">
+      <h2>Streamers</h2>
+      <p>Tomorrow's streaming pitcher rankings — ${data.game_date || 'upcoming'}</p>
+    </div>`;
+
+  // Status card
+  html += '<div class="streamer-status-card">';
+  if (status) {
+    const freshness = status.tomorrow_slate || {};
+    const stale = freshness.stale_stages || [];
+    const statusClass = stale.length === 0 ? 'status-fresh' : stale.length <= 2 ? 'status-stale' : 'status-old';
+    const statusLabel = stale.length === 0 ? 'Fresh' : stale.length <= 2 ? 'Partially Stale' : 'Stale';
+    html += `
+      <div class="status-item">
+        <span class="status-dot ${statusClass}"></span>
+        <span class="status-label">Data: <strong>${statusLabel}</strong></span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Model: <strong>${data.model_version || '—'}</strong></span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Pitchers: <strong>${pitchers.length}</strong></span>
+      </div>`;
+    if (stale.length > 0) {
+      html += `<div class="status-item"><span class="status-label" style="color:var(--yellow)">Stale: ${stale.join(', ')}</span></div>`;
+    }
+  } else {
+    html += '<div class="status-item"><span class="status-label" style="color:var(--text-muted)">Status unavailable</span></div>';
+  }
+  html += `<button class="refresh-btn streamer-refresh-btn" onclick="refreshStreamers()" title="Refresh backend data">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Refresh
+    </button>`;
+  html += '</div>';
+
+  // Filter controls
+  const allTags = ['all', ...Array.from(tags).sort()];
+  html += `<div class="controls">
+    <div class="control-group">
+      <label>Filter</label>
+      <div class="pill-group">
+        ${allTags.map(t => `<button class="pill ${state.streamerFilter === t ? 'active' : ''}" onclick="setStreamerFilter('${t}')">${t === 'all' ? 'All' : formatTag(t)}</button>`).join('')}
+      </div>
+    </div>
+  </div>`;
+
+  if (filtered.length === 0) {
+    html += '<div class="empty-state"><p>No streamers match this filter.</p></div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  // Summary row
+  const topPick = pitchers.find(p => (p.tags || []).includes('top-pick'));
+  const avgScore = pitchers.length > 0 ? (pitchers.reduce((s, p) => s + (p.stream_score || 0), 0) / pitchers.length).toFixed(1) : '—';
+  const simCount = pitchers.filter(p => (p.tags || []).includes('sim')).length;
+  html += `<div class="summary-row">
+    <div class="summary-card"><div class="label">Top Pick</div><div class="value accent">${topPick ? topPick.pitcher_name : '—'}</div></div>
+    <div class="summary-card"><div class="label">Avg Score</div><div class="value green">${avgScore}</div></div>
+    <div class="summary-card"><div class="label">Simulated</div><div class="value">${simCount}</div></div>
+    <div class="summary-card"><div class="label">Total</div><div class="value">${pitchers.length}</div></div>
+  </div>`;
+
+  // Desktop table
+  html += `<div class="table-wrap streamer-table"><table data-table="streamers">
+    <thead><tr>
+      <th onclick="sortStreamerTable('rank')">#</th>
+      <th onclick="sortStreamerTable('name')">Pitcher</th>
+      <th>Matchup</th>
+      <th onclick="sortStreamerTable('score')">Score</th>
+      <th onclick="sortStreamerTable('k')">K</th>
+      <th onclick="sortStreamerTable('era')">ERA</th>
+      <th onclick="sortStreamerTable('whip')">WHIP</th>
+      <th onclick="sortStreamerTable('ip')">IP</th>
+      <th onclick="sortStreamerTable('win')">Win%</th>
+      <th>Tags</th>
+      <th></th>
+    </tr></thead><tbody>`;
+
+  filtered.forEach((p, i) => {
+    const sc = (p.stream_score || 0) >= 65 ? 'score-hot' : (p.stream_score || 0) >= 45 ? 'score-warm' : 'score-cold';
+    const mu = p.home_away === 'home' ? `vs ${p.opponent_team}` : `@ ${p.opponent_team}`;
+    const expanded = state.expandedStreamer === p.pitcher_name;
+    const blowup = p.blowup_probability != null ? p.blowup_probability : null;
+
+    html += `<tr class="streamer-row${expanded ? ' expanded' : ''}" onclick="toggleStreamerDetail('${p.pitcher_name.replace(/'/g, "\\'")}')">
+      <td>${i + 1}</td>
+      <td><span class="player-name">${p.pitcher_name}</span><span class="player-team">${p.pitcher_team}</span></td>
+      <td>${mu}</td>
+      <td><span class="score-badge ${sc}">${(p.stream_score || 0).toFixed(1)}</span></td>
+      <td>${p.projected_k != null ? p.projected_k.toFixed(1) : '—'}</td>
+      <td>${p.projected_era != null ? p.projected_era.toFixed(2) : '—'}</td>
+      <td>${p.projected_whip != null ? p.projected_whip.toFixed(2) : '—'}</td>
+      <td>${p.projected_ip != null ? p.projected_ip.toFixed(1) : '—'}</td>
+      <td>${p.win_probability != null ? (p.win_probability * 100).toFixed(0) + '%' : '—'}</td>
+      <td>${(p.tags || []).map(t => `<span class="streamer-tag tag-${t}">${formatTag(t)}</span>`).join(' ')}</td>
+      <td class="expand-icon">${expanded ? '▼' : '▶'}</td>
+    </tr>`;
+
+    if (expanded) {
+      html += `<tr class="streamer-detail-row"><td colspan="11"><div class="streamer-detail">`;
+
+      // Projection details
+      html += '<div class="detail-grid">';
+      html += `<div class="detail-col">
+        <h4>Projections</h4>
+        <div class="detail-stat"><span>IP</span><strong>${p.projected_ip != null ? p.projected_ip.toFixed(1) : '—'}</strong></div>
+        <div class="detail-stat"><span>K</span><strong>${p.projected_k != null ? p.projected_k.toFixed(1) : '—'}</strong></div>
+        <div class="detail-stat"><span>BB</span><strong>${p.projected_bb != null ? p.projected_bb.toFixed(1) : '—'}</strong></div>
+        <div class="detail-stat"><span>H</span><strong>${p.projected_h != null ? p.projected_h.toFixed(1) : '—'}</strong></div>
+        <div class="detail-stat"><span>ER</span><strong>${p.projected_er != null ? p.projected_er.toFixed(1) : '—'}</strong></div>
+      </div>`;
+
+      html += `<div class="detail-col">
+        <h4>Rate Stats</h4>
+        <div class="detail-stat"><span>ERA</span><strong>${p.projected_era != null ? p.projected_era.toFixed(2) : '—'}</strong></div>
+        <div class="detail-stat"><span>WHIP</span><strong>${p.projected_whip != null ? p.projected_whip.toFixed(2) : '—'}</strong></div>
+        <div class="detail-stat"><span>Win%</span><strong>${p.win_probability != null ? (p.win_probability * 100).toFixed(0) + '%' : '—'}</strong></div>
+        <div class="detail-stat"><span>Blowup%</span><strong style="color:${blowup != null && blowup > 0.25 ? 'var(--red)' : 'inherit'}">${blowup != null ? (blowup * 100).toFixed(0) + '%' : '—'}</strong></div>
+        <div class="detail-stat"><span>Confidence</span><strong>${p.confidence != null ? p.confidence.toFixed(2) : '—'}</strong></div>
+      </div>`;
+
+      // Simulation percentiles (if available)
+      if (p.k_p50 != null) {
+        html += `<div class="detail-col">
+          <h4>Simulation (P20 / P50 / P80)</h4>
+          <div class="detail-stat"><span>K</span><strong>${fmtPercentiles(p.k_p20, p.k_p50, p.k_p80)}</strong></div>
+          <div class="detail-stat"><span>ERA</span><strong>${fmtPercentiles(p.era_p20, p.era_p50, p.era_p80, 2)}</strong></div>
+          <div class="detail-stat"><span>WHIP</span><strong>${fmtPercentiles(p.whip_p20, p.whip_p50, p.whip_p80, 2)}</strong></div>
+        </div>`;
+      }
+
+      html += '</div></div></td></tr>';
+    }
+  });
+
+  html += '</tbody></table></div>';
+
+  // Mobile cards
+  html += '<div class="streamer-cards">';
+  filtered.forEach((p, i) => {
+    const sc = (p.stream_score || 0) >= 65 ? 'score-hot' : (p.stream_score || 0) >= 45 ? 'score-warm' : 'score-cold';
+    const mu = p.home_away === 'home' ? `vs ${p.opponent_team}` : `@ ${p.opponent_team}`;
+    const expanded = state.expandedStreamer === p.pitcher_name;
+
+    html += `<div class="streamer-card${expanded ? ' expanded' : ''}" onclick="toggleStreamerDetail('${p.pitcher_name.replace(/'/g, "\\'")}')">
+      <div class="pitcher-card-left">
+        <div class="pc-name">${p.pitcher_name} <span style="color:var(--text-muted);font-weight:400">${p.pitcher_team}</span></div>
+        <div class="pc-meta">${mu}</div>
+        <div class="pc-details">
+          <span>K: ${p.projected_k != null ? p.projected_k.toFixed(1) : '—'}</span>
+          <span>ERA: ${p.projected_era != null ? p.projected_era.toFixed(2) : '—'}</span>
+          <span>WHIP: ${p.projected_whip != null ? p.projected_whip.toFixed(2) : '—'}</span>
+          <span>Win: ${p.win_probability != null ? (p.win_probability * 100).toFixed(0) + '%' : '—'}</span>
+        </div>
+        <div class="pc-tags">${(p.tags || []).map(t => `<span class="streamer-tag tag-${t}">${formatTag(t)}</span>`).join(' ')}</div>
+      </div>
+      <div class="pitcher-card-right">
+        <span class="score-badge ${sc}" style="font-size:16px;padding:6px 14px">${(p.stream_score || 0).toFixed(1)}</span>
+      </div>`;
+
+    if (expanded) {
+      html += `<div class="streamer-card-detail" onclick="event.stopPropagation()">
+        <div class="detail-grid">
+          <div class="detail-col">
+            <div class="detail-stat"><span>IP</span><strong>${p.projected_ip != null ? p.projected_ip.toFixed(1) : '—'}</strong></div>
+            <div class="detail-stat"><span>BB</span><strong>${p.projected_bb != null ? p.projected_bb.toFixed(1) : '—'}</strong></div>
+            <div class="detail-stat"><span>Blowup%</span><strong>${p.blowup_probability != null ? (p.blowup_probability * 100).toFixed(0) + '%' : '—'}</strong></div>
+          </div>`;
+      if (p.k_p50 != null) {
+        html += `<div class="detail-col">
+            <h4 style="font-size:11px">Sim P20/P50/P80</h4>
+            <div class="detail-stat"><span>K</span><strong>${fmtPercentiles(p.k_p20, p.k_p50, p.k_p80)}</strong></div>
+            <div class="detail-stat"><span>ERA</span><strong>${fmtPercentiles(p.era_p20, p.era_p50, p.era_p80, 2)}</strong></div>
+          </div>`;
+      }
+      html += '</div></div>';
+    }
+
+    html += '</div>';
+  });
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function formatTag(tag) {
+  return tag.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function fmtPercentiles(p20, p50, p80, decimals = 1) {
+  const fmt = v => v != null ? v.toFixed(decimals) : '—';
+  return `${fmt(p20)} / ${fmt(p50)} / ${fmt(p80)}`;
+}
+
+function toggleStreamerDetail(name) {
+  state.expandedStreamer = state.expandedStreamer === name ? null : name;
+  renderPage();
+}
+
+function setStreamerFilter(filter) {
+  state.streamerFilter = filter;
+  renderPage();
+}
+
+async function refreshStreamers() {
+  const btn = document.querySelector('.streamer-refresh-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;margin:0;border-width:2px"></span> Refreshing...'; }
+  try {
+    await wizardApiPost('/admin/refresh-all?force=true');
+    state.streamersData = null;
+    state.backendStatus = null;
+    await renderPage();
+  } catch (e) {
+    console.error('Refresh failed:', e);
+    if (btn) btn.innerHTML = 'Refresh Failed';
+    setTimeout(() => { if (btn) btn.innerHTML = 'Refresh'; btn.disabled = false; }, 2000);
+  }
+}
+
+let streamerSortState = {};
+function sortStreamerTable(key) {
+  const table = document.querySelector('table[data-table="streamers"]');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr.streamer-row'));
+
+  const prev = streamerSortState.key;
+  const asc = (prev === key) ? !streamerSortState.asc : (key === 'name');
+  streamerSortState = { key, asc };
+
+  const colMap = { rank: 0, name: 1, score: 3, k: 4, era: 5, whip: 6, ip: 7, win: 8 };
+  const colIdx = colMap[key] ?? 0;
+
+  rows.sort((a, b) => {
+    const aText = a.cells[colIdx]?.textContent?.trim() || '';
+    const bText = b.cells[colIdx]?.textContent?.trim() || '';
+    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+    if (!isNaN(aNum) && !isNaN(bNum)) return asc ? aNum - bNum : bNum - aNum;
+    return asc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+  });
+
+  rows.forEach(r => {
+    const detail = r.nextElementSibling;
+    tbody.appendChild(r);
+    if (detail && detail.classList.contains('streamer-detail-row')) tbody.appendChild(detail);
+  });
 }
 
 // ── Rankings ──
