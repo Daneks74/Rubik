@@ -72,6 +72,14 @@ def get_mlb_odds(api_key: str) -> list[GameOdds]:
             if home_ml is not None and over_under is not None:
                 break
 
+        # Reject unrealistic O/U values (typical MLB range is ~6.5–12.5)
+        if over_under is not None and (over_under < 5.0 or over_under > 14.0):
+            logger.warning(
+                "Ignoring unrealistic O/U %.1f for %s vs %s",
+                over_under, home_team, away_team,
+            )
+            over_under = None
+
         home_prob = moneyline_to_implied_prob(home_ml) if home_ml else None
         away_prob = moneyline_to_implied_prob(away_ml) if away_ml else None
 

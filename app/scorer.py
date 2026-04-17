@@ -40,16 +40,23 @@ def score_pitcher(
             win_prob = odds.away_implied_prob
         breakdown["matchup"] = win_prob if win_prob else 0.5
     elif team_records:
-        # Fallback: use team win% as proxy for matchup strength
+        # Fallback: estimate win probability from team records using log5 method
         pitcher_team = team_records.get(start.team_abbrev, {})
         opp_team = team_records.get(start.opponent_abbrev, {})
         pitcher_pct = pitcher_team.get("pct", 0.5)
         opp_pct = opp_team.get("pct", 0.5)
-        # Pitcher on a better team facing a weaker opponent = better matchup
-        # Simple model: pitcher_pct * (1 - opp_pct) * 2, clamped to [0, 1]
-        matchup = pitcher_pct * (1 - opp_pct) * 2
-        breakdown["matchup"] = max(0.0, min(1.0, matchup))
-        win_prob = breakdown["matchup"]
+        # Regress toward .500 to reduce early-season small-sample volatility
+        p_a = 0.5 + (pitcher_pct - 0.5) * 0.6
+        p_b = 0.5 + (opp_pct - 0.5) * 0.6
+        # Log5: P(A beats B) = pA*(1-pB) / (pA*(1-pB) + pB*(1-pA))
+        numerator = p_a * (1 - p_b)
+        denominator = numerator + p_b * (1 - p_a)
+        matchup = numerator / denominator if denominator > 0 else 0.5
+        # Home field edge
+        matchup += 0.03 if start.is_home else -0.03
+        matchup = max(0.30, min(0.70, matchup))
+        breakdown["matchup"] = matchup
+        win_prob = matchup
     else:
         breakdown["matchup"] = 0.5
 
