@@ -196,7 +196,7 @@ async function renderSPPicker(el) {
             <span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span>
             ${isPublic
               ? `<span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
-              : `<span>Proj: ${p.projected_pts || '—'}</span>`}
+              : `<span>Proj: ${p.projected_pts || '—'}</span><span>Own: ${p.pct_owned}%</span>`}
             ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
             ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
           </div>
