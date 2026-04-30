@@ -288,6 +288,17 @@ async def api_sp_picker():
         best_era = bp["projected_era"] if bp else (ros_era or espn_era)
         best_whip = bp["projected_whip"] if bp else (ros_whip or espn_whip)
 
+        # Log first pitcher's available data for debugging
+        if not by_date:
+            stat_keys = sorted(rec.pitcher.stats.keys()) if rec.pitcher.stats else []
+            proj_keys = sorted(rec.pitcher.projected_stats.keys()) if rec.pitcher.projected_stats else []
+            logger.info(
+                "SP Picker debug — %s: stats_keys=%s, proj_keys=%s, "
+                "espn_era=%s, espn_whip=%s, ros_era=%s, ros_whip=%s, backend=%s",
+                rec.pitcher.name, stat_keys[:10], proj_keys[:10],
+                espn_era, espn_whip, ros_era, ros_whip, bool(bp),
+            )
+
         entry = {
             "name": rec.pitcher.name,
             "team": rec.pitcher.pro_team,
@@ -324,6 +335,45 @@ async def api_sp_picker():
         "has_backend": bool(backend_projs),
         "mode": mode,
     }
+
+
+@app.get("/api/debug-sp-stats")
+async def api_debug_sp_stats():
+    """Debug: show what stat data sources are available for the first SP."""
+    config = get_config()
+    espn = get_espn()
+    if not espn:
+        return {"error": "no ESPN"}
+
+    from datetime import timedelta
+    today = date.today()
+    starts = get_probable_starters(today, days_ahead=2)
+    free_agents = espn.get_free_agent_sps(size=20)
+
+    from app.matcher import match_pitchers_to_starts
+    matched = match_pitchers_to_starts(free_agents, starts)
+
+    all_proj = get_projections()
+
+    samples = []
+    for pitcher, start in matched[:3]:
+        fg = get_player_projections(pitcher.name, all_proj)
+        steamer = fg.get("Steamer", {})
+
+        samples.append({
+            "name": pitcher.name,
+            "espn_stats_keys": sorted(pitcher.stats.keys()) if pitcher.stats else [],
+            "espn_proj_keys": sorted(pitcher.projected_stats.keys()) if pitcher.projected_stats else [],
+            "espn_stats_era": pitcher.stats.get("ERA"),
+            "espn_stats_whip": pitcher.stats.get("WHIP"),
+            "espn_proj_era": pitcher.projected_stats.get("ERA"),
+            "espn_proj_whip": pitcher.projected_stats.get("WHIP"),
+            "fangraphs_steamer_era": steamer.get("ERA"),
+            "fangraphs_steamer_whip": steamer.get("WHIP"),
+            "backend_url_set": bool(config.wizard_backend_url),
+        })
+
+    return {"pitchers": samples}
 
 
 # ──────────────────────────────────────────────
