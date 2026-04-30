@@ -277,8 +277,16 @@ async def api_sp_picker():
         ros_era = steamer.get("ERA") or zips.get("ERA")
         ros_whip = steamer.get("WHIP") or zips.get("WHIP")
 
+        # ESPN stats from the player object (current season + projected)
+        espn_era = rec.pitcher.projected_stats.get("ERA") or rec.pitcher.stats.get("ERA")
+        espn_whip = rec.pitcher.projected_stats.get("WHIP") or rec.pitcher.stats.get("WHIP")
+
         # Backend per-game projection (matchup-adjusted)
         bp = backend_projs.get(_norm_pitcher_name(rec.pitcher.name))
+
+        # Cascade: backend per-game > FanGraphs ROS > ESPN
+        best_era = bp["projected_era"] if bp else (ros_era or espn_era)
+        best_whip = bp["projected_whip"] if bp else (ros_whip or espn_whip)
 
         entry = {
             "name": rec.pitcher.name,
@@ -295,9 +303,9 @@ async def api_sp_picker():
             "opp_win_pct": opp_record.get("pct"),
             "score": rec.score,
             "breakdown": rec.score_breakdown,
-            # Best available ERA/WHIP: per-game from backend, fallback to FanGraphs ROS
-            "era": bp["projected_era"] if bp else ros_era,
-            "whip": bp["projected_whip"] if bp else ros_whip,
+            # Best available ERA/WHIP: backend per-game > FanGraphs ROS > ESPN
+            "era": best_era,
+            "whip": best_whip,
             "k9": steamer.get("K/9") or zips.get("K/9"),
             # Per-game projection details (when backend data is available)
             "game_proj": bool(bp),
