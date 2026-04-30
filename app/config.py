@@ -11,6 +11,7 @@ class AppConfig:
     espn_swid: str = ""
     season_year: int = 2026
     odds_api_key: Optional[str] = None
+    wizard_backend_url: Optional[str] = None
 
     @property
     def has_espn(self) -> bool:
@@ -35,10 +36,13 @@ def load_config() -> AppConfig:
     season_year = int(os.getenv("SEASON_YEAR", "2026"))
     odds_api_key = os.getenv("ODDS_API_KEY") or None
 
+    wizard_backend_url = os.getenv("WIZARD_BACKEND_URL") or None
+
     return AppConfig(
         espn_league_ids=league_ids,
         espn_s2=espn_s2,
         espn_swid=espn_swid,
         season_year=season_year,
         odds_api_key=odds_api_key,
+        wizard_backend_url=wizard_backend_url,
     )

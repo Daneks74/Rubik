@@ -1,6 +1,8 @@
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
+
+import requests as http_requests
 
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -155,6 +157,42 @@ async def api_league_info():
 
 
 # ──────────────────────────────────────────────
+# Backend projection integration
+# ──────────────────────────────────────────────
+
+def _norm_pitcher_name(name: str) -> str:
+    return name.lower().replace(".", "").replace("-", " ").strip()
+
+
+def _fetch_backend_projections(dates: list[date]) -> dict[str, dict]:
+    """Fetch per-game projections from the backend for the given dates.
+    Returns a dict mapping normalized pitcher name → projection dict.
+    Fails gracefully to an empty dict if the backend is unreachable."""
+    config = get_config()
+    if not config.wizard_backend_url:
+        return {}
+
+    proj_map: dict[str, dict] = {}
+    for d in dates[:3]:
+        try:
+            resp = http_requests.get(
+                f"{config.wizard_backend_url}/projections/tomorrow",
+                params={"date": d.isoformat(), "limit": 100},
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            for p in data.get("pitchers", []):
+                key = _norm_pitcher_name(p["pitcher_name"])
+                proj_map[key] = p
+        except Exception as e:
+            logger.warning("Backend projection fetch failed for %s: %s", d, e)
+            break
+    return proj_map
+
+
+# ──────────────────────────────────────────────
 # API: SP Picker (works with OR without ESPN)
 # ──────────────────────────────────────────────
 
@@ -216,6 +254,10 @@ async def api_sp_picker():
         recs = rank_recommendations(recs)
         mode = "public"
 
+    # Fetch matchup-adjusted per-game projections from the backend
+    tomorrow = today + timedelta(days=1)
+    backend_projs = _fetch_backend_projections([today, tomorrow])
+
     # Group by date
     by_date = {}
     for rec in recs:
@@ -230,6 +272,13 @@ async def api_sp_picker():
         fg_proj = get_player_projections(rec.pitcher.name, all_proj)
         steamer = fg_proj.get("Steamer", {})
         zips = fg_proj.get("ZiPS", {})
+
+        # FanGraphs ROS stats (season-level averages)
+        ros_era = steamer.get("ERA") or zips.get("ERA")
+        ros_whip = steamer.get("WHIP") or zips.get("WHIP")
+
+        # Backend per-game projection (matchup-adjusted)
+        bp = backend_projs.get(_norm_pitcher_name(rec.pitcher.name))
 
         entry = {
             "name": rec.pitcher.name,
@@ -246,10 +295,15 @@ async def api_sp_picker():
             "opp_win_pct": opp_record.get("pct"),
             "score": rec.score,
             "breakdown": rec.score_breakdown,
-            # FanGraphs stats for no-ESPN mode
-            "era": steamer.get("ERA") or zips.get("ERA"),
-            "whip": steamer.get("WHIP") or zips.get("WHIP"),
+            # Best available ERA/WHIP: per-game from backend, fallback to FanGraphs ROS
+            "era": bp["projected_era"] if bp else ros_era,
+            "whip": bp["projected_whip"] if bp else ros_whip,
             "k9": steamer.get("K/9") or zips.get("K/9"),
+            # Per-game projection details (when backend data is available)
+            "game_proj": bool(bp),
+            "game_k": bp["projected_k"] if bp else None,
+            "game_ip": bp["projected_ip"] if bp else None,
+            "confidence": bp.get("confidence") if bp else None,
         }
         by_date[d].append(entry)
 
@@ -259,6 +313,7 @@ async def api_sp_picker():
         "total_with_starts": len(recs),
         "has_odds": bool(odds_list),
         "has_records": bool(records),
+        "has_backend": bool(backend_projs),
         "mode": mode,
     }
 

@@ -153,9 +153,10 @@ async function renderSPPicker(el) {
     // Desktop table
     html += `<div class="table-wrap sp-table"><table>
       <thead><tr>
-        <th>#</th><th>Pitcher</th><th>Matchup</th>`;
+        <th>#</th><th>Pitcher</th><th>Matchup</th>
+        <th>ERA</th><th>WHIP</th>`;
     if (isPublic) {
-      html += '<th>ERA</th><th>WHIP</th><th>K/9</th>';
+      html += '<th>K/9</th>';
     } else {
       html += '<th>Proj</th><th>Own%</th>';
     }
@@ -167,10 +168,12 @@ async function renderSPPicker(el) {
       const mu = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
       html += `<tr>
         <td>${i + 1}</td>
-        <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span></td>
-        <td>${mu}</td>`;
+        <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span>${p.game_proj ? ' <span class="proj-badge">Game</span>' : ''}</td>
+        <td>${mu}</td>
+        <td>${fmtStat(p.era, 'ERA')}</td>
+        <td>${fmtStat(p.whip, 'WHIP')}</td>`;
       if (isPublic) {
-        html += `<td>${fmtStat(p.era, 'ERA')}</td><td>${fmtStat(p.whip, 'WHIP')}</td><td>${fmtStat(p.k9, 'K/9')}</td>`;
+        html += `<td>${fmtStat(p.k9, 'K/9')}</td>`;
       } else {
         html += `<td>${p.projected_pts || '—'}</td><td>${p.pct_owned}%</td>`;
       }
@@ -190,9 +193,10 @@ async function renderSPPicker(el) {
           <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">${p.team}</span></div>
           <div class="pc-meta">${mu}${p.opp_record ? ' (' + p.opp_record + ')' : ''}</div>
           <div class="pc-details">
+            <span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span>
             ${isPublic
-              ? `<span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span><span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
-              : `<span>Proj: ${p.projected_pts || '—'}</span><span>Own: ${p.pct_owned}%</span>`}
+              ? `<span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
+              : `<span>Proj: ${p.projected_pts || '—'}</span>`}
             ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
             ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
           </div>
