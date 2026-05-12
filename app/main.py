@@ -197,7 +197,7 @@ def _fetch_backend_projections(dates: list[date]) -> dict[str, dict]:
 # ──────────────────────────────────────────────
 
 @app.get("/api/sp-picker")
-async def api_sp_picker():
+async def api_sp_picker(pool: str = Query("fa")):
     config = get_config()
     espn = get_espn()
 
@@ -214,6 +214,37 @@ async def api_sp_picker():
     if espn:
         # Full mode: show free agent SPs with scheduled starts
         free_agents = espn.get_free_agent_sps(size=150)
+        fa_count = len(free_agents)
+        player_source = {p.name: "fa" for p in free_agents}
+
+        if pool in ("roster", "all"):
+            swid = espn.espn_swid.strip('{}')
+            my_team_name = None
+            for t in espn.league.teams:
+                owners = getattr(t, 'owners', [])
+                for o in owners:
+                    oid = o.get('id', str(o)) if isinstance(o, dict) else str(o)
+                    if swid in oid:
+                        my_team_name = t.team_name
+                        break
+                if my_team_name:
+                    break
+
+            if pool == "roster" and my_team_name:
+                team_data = espn.get_my_team(my_team_name)
+                for p in team_data["players"]:
+                    if p.position in ('SP', 'RP', 'P') and p.name not in player_source:
+                        free_agents.append(p)
+                        player_source[p.name] = "mine"
+            elif pool == "all":
+                for team in espn.league.teams:
+                    is_mine = my_team_name and team.team_name == my_team_name
+                    for player in team.roster:
+                        info = espn._extract_player_info(player)
+                        if info.position in ('SP', 'RP', 'P') and info.name not in player_source:
+                            free_agents.append(info)
+                            player_source[info.name] = "mine" if is_mine else "rostered"
+
         matched = match_pitchers_to_starts(free_agents, starts)
         recs = []
         for pitcher, start in matched:
@@ -224,6 +255,8 @@ async def api_sp_picker():
         mode = "league"
     else:
         # No-ESPN mode: show ALL probable starters with projections + odds
+        player_source = {}
+        fa_count = 0
         recs = []
         from app.models import PlayerInfo, PitcherRecommendation
         for start in starts:
@@ -306,6 +339,7 @@ async def api_sp_picker():
             "is_home": rec.scheduled_start.is_home,
             "projected_pts": rec.pitcher.projected_points or None,
             "pct_owned": rec.pitcher.percent_owned,
+            "source": player_source.get(rec.pitcher.name, "fa"),
             "moneyline": (rec.odds.home_moneyline if rec.scheduled_start.is_home else rec.odds.away_moneyline) if rec.odds else None,
             "win_prob": round(rec.win_probability * 100, 1) if rec.win_probability else None,
             "over_under": rec.odds.over_under if rec.odds else None,
@@ -328,8 +362,9 @@ async def api_sp_picker():
 
     return {
         "dates": by_date,
-        "total_free_agents": len(free_agents) if espn else 0,
+        "total_free_agents": fa_count if espn else 0,
         "total_with_starts": len(recs),
+        "pool": pool if espn else "public",
         "has_odds": bool(odds_list),
         "has_records": bool(records),
         "has_backend": bool(backend_projs),

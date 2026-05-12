@@ -9,6 +9,7 @@ const state = {
   activeLeagueId: null,
   leagueInfo: null,
   spData: null,
+  spPool: 'fa',
   rankingsData: null,
   rosterData: null,
   freeAgentsData: null,
@@ -111,22 +112,39 @@ async function renderPage() {
 // ── SP Picker ──
 
 async function renderSPPicker(el) {
-  if (!state.spData) state.spData = await api('/api/sp-picker');
+  if (!state.spData) state.spData = await api(`/api/sp-picker?pool=${state.spPool}`);
   const data = state.spData;
   const dates = Object.keys(data.dates).sort();
   const today = new Date().toISOString().split('T')[0];
   const tmrw = nextDay(today);
 
   const isPublic = data.mode === 'public';
-  const subtitle = isPublic ? 'All probable starters — next 7 days' : 'Free agent starters — next 7 days';
+  let subtitle;
+  if (isPublic || state.spPool === 'all') subtitle = 'All probable starters — next 7 days';
+  else if (state.spPool === 'roster') subtitle = 'Free agents + my team — next 7 days';
+  else subtitle = 'Free agent starters — next 7 days';
 
   let html = `
     <div class="page-header">
       <h2>SP Picker</h2>
       <p>${subtitle}</p>
-    </div>
-    <div class="summary-row">
-      ${!isPublic ? `<div class="summary-card"><div class="label">Free Agent SPs</div><div class="value accent">${data.total_free_agents}</div></div>` : ''}
+    </div>`;
+
+  if (!isPublic) {
+    html += `<div class="controls">
+      <div class="control-group">
+        <label>Pool</label>
+        <div class="pill-group">
+          <button class="pill ${state.spPool === 'fa' ? 'active' : ''}" onclick="setSpPool('fa')">Free</button>
+          <button class="pill ${state.spPool === 'roster' ? 'active' : ''}" onclick="setSpPool('roster')">Team</button>
+          <button class="pill ${state.spPool === 'all' ? 'active' : ''}" onclick="setSpPool('all')">All</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  html += `<div class="summary-row">
+      ${!isPublic ? `<div class="summary-card"><div class="label">${state.spPool === 'fa' ? 'Free Agent SPs' : 'Pool'}</div><div class="value accent">${data.total_free_agents}</div></div>` : ''}
       <div class="summary-card"><div class="label">${isPublic ? 'Starters' : 'With Starts'}</div><div class="value green">${data.total_with_starts}</div></div>
       <div class="summary-card"><div class="label">Days</div><div class="value">${dates.length}</div></div>
       <div class="summary-card"><div class="label">Data</div><div class="value" style="font-size:14px">${data.has_odds ? 'Vegas + Records' : data.has_records ? 'Team Records' : 'Projections'}</div></div>
@@ -168,7 +186,7 @@ async function renderSPPicker(el) {
       const mu = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
       html += `<tr>
         <td>${i + 1}</td>
-        <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span>${p.game_proj ? ' <span class="proj-badge">Game</span>' : ''}</td>
+        <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span>${p.source === 'mine' ? ' <span class="roster-badge mine">MY</span>' : p.source === 'rostered' ? ' <span class="roster-badge owned">OWNED</span>' : ''}${p.game_proj ? ' <span class="proj-badge">Game</span>' : ''}</td>
         <td>${mu}</td>
         <td>${fmtStat(p.era, 'ERA')}</td>
         <td>${fmtStat(p.whip, 'WHIP')}</td>`;
@@ -190,7 +208,7 @@ async function renderSPPicker(el) {
       const mu = p.is_home ? `vs ${p.opponent}` : `@ ${p.opponent}`;
       html += `<div class="pitcher-card">
         <div class="pitcher-card-left">
-          <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">${p.team}</span></div>
+          <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">${p.team}</span>${p.source === 'mine' ? ' <span class="roster-badge mine">MY</span>' : p.source === 'rostered' ? ' <span class="roster-badge owned">OWNED</span>' : ''}</div>
           <div class="pc-meta">${mu}${p.opp_record ? ' (' + p.opp_record + ')' : ''}</div>
           <div class="pc-details">
             <span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span>
@@ -210,6 +228,12 @@ async function renderSPPicker(el) {
   }
 
   el.innerHTML = html;
+}
+
+function setSpPool(pool) {
+  state.spPool = pool;
+  state.spData = null;
+  renderPage();
 }
 
 // ── Streamers ──

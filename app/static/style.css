@@ -349,6 +349,25 @@ tr.fa-upgrade td:first-child { border-left: 3px solid var(--green); }
   letter-spacing: 0.3px;
 }
 
+.roster-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  vertical-align: middle;
+  margin-left: 4px;
+  letter-spacing: 0.5px;
+}
+.roster-badge.mine {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--green);
+}
+.roster-badge.owned {
+  background: rgba(250, 204, 21, 0.15);
+  color: var(--yellow);
+}
+
 .upgrade-badge {
   display: inline-block;
   padding: 1px 5px;
