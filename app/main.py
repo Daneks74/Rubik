@@ -321,6 +321,28 @@ async def api_sp_picker(pool: str = Query("fa")):
         best_era = bp["projected_era"] if bp else (ros_era or espn_era)
         best_whip = bp["projected_whip"] if bp else (ros_whip or espn_whip)
 
+        # Per-start K and IP: backend per-game > FanGraphs ROS per-start > ESPN per-start
+        if bp:
+            proj_k = bp["projected_k"]
+            proj_ip = bp["projected_ip"]
+        else:
+            fg_so = steamer.get("SO") or zips.get("SO")
+            fg_ip = steamer.get("IP") or zips.get("IP")
+            fg_gs = steamer.get("GS") or zips.get("GS")
+            if fg_gs and fg_gs > 0:
+                proj_k = round(fg_so / fg_gs, 1) if fg_so else None
+                proj_ip = round(fg_ip / fg_gs, 1) if fg_ip else None
+            else:
+                espn_k = rec.pitcher.projected_stats.get("K") or rec.pitcher.stats.get("K")
+                espn_outs = rec.pitcher.projected_stats.get("OUTS") or rec.pitcher.stats.get("OUTS")
+                espn_gs = rec.pitcher.projected_stats.get("GS") or rec.pitcher.stats.get("GS")
+                if espn_gs and espn_gs > 0:
+                    proj_k = round(espn_k / espn_gs, 1) if espn_k else None
+                    proj_ip = round((espn_outs / 3) / espn_gs, 1) if espn_outs else None
+                else:
+                    proj_k = None
+                    proj_ip = None
+
         # Log first pitcher's available data for debugging
         if not by_date:
             stat_keys = sorted(rec.pitcher.stats.keys()) if rec.pitcher.stats else []
@@ -351,6 +373,8 @@ async def api_sp_picker(pool: str = Query("fa")):
             # Best available ERA/WHIP: backend per-game > FanGraphs ROS > ESPN
             "era": best_era,
             "whip": best_whip,
+            "proj_k": proj_k,
+            "proj_ip": proj_ip,
             "k9": steamer.get("K/9") or zips.get("K/9"),
             # Per-game projection details (when backend data is available)
             "game_proj": bool(bp),

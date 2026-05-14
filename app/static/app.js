@@ -172,11 +172,11 @@ async function renderSPPicker(el) {
     html += `<div class="table-wrap sp-table"><table>
       <thead><tr>
         <th>#</th><th>Pitcher</th><th>Matchup</th>
-        <th>ERA</th><th>WHIP</th>`;
+        <th>ERA</th><th>WHIP</th><th>K</th><th>IP</th>`;
     if (isPublic) {
       html += '<th>K/9</th>';
     } else {
-      html += '<th>Proj</th><th>Own%</th>';
+      html += '<th>Own%</th>';
     }
     if (data.has_odds) html += '<th>ML</th><th>O/U</th>';
     html += '<th>Opp Rec</th><th>Score</th></tr></thead><tbody>';
@@ -189,11 +189,13 @@ async function renderSPPicker(el) {
         <td><span class="player-name">${p.name}</span><span class="player-team">${p.team}</span>${p.source === 'mine' ? ' <span class="roster-badge mine">MY</span>' : p.source === 'rostered' ? ' <span class="roster-badge owned">OWNED</span>' : ''}${p.game_proj ? ' <span class="proj-badge">Game</span>' : ''}</td>
         <td>${mu}</td>
         <td>${fmtStat(p.era, 'ERA')}</td>
-        <td>${fmtStat(p.whip, 'WHIP')}</td>`;
+        <td>${fmtStat(p.whip, 'WHIP')}</td>
+        <td>${fmtStat(p.proj_k, 'K')}</td>
+        <td>${fmtStat(p.proj_ip, 'IP')}</td>`;
       if (isPublic) {
         html += `<td>${fmtStat(p.k9, 'K/9')}</td>`;
       } else {
-        html += `<td>${p.projected_pts || '—'}</td><td>${p.pct_owned}%</td>`;
+        html += `<td>${p.pct_owned}%</td>`;
       }
       if (data.has_odds) html += `<td>${fmtML(p.moneyline)}</td><td>${p.over_under || '—'}</td>`;
       html += `<td>${p.opp_record || '—'}</td>
@@ -212,9 +214,10 @@ async function renderSPPicker(el) {
           <div class="pc-meta">${mu}${p.opp_record ? ' (' + p.opp_record + ')' : ''}</div>
           <div class="pc-details">
             <span>ERA: ${fmtStat(p.era, 'ERA')}</span><span>WHIP: ${fmtStat(p.whip, 'WHIP')}</span>
+            <span>K: ${fmtStat(p.proj_k, 'K')}</span><span>IP: ${fmtStat(p.proj_ip, 'IP')}</span>
             ${isPublic
               ? `<span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
-              : `<span>Proj: ${p.projected_pts || '—'}</span><span>Own: ${p.pct_owned}%</span>`}
+              : `<span>Own: ${p.pct_owned}%</span>`}
             ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
             ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
           </div>
