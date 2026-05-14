@@ -506,7 +506,8 @@ th[onclick]:hover { color: var(--accent); }
 
 .pitcher-card-left .pc-details {
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   margin-top: 6px;
   font-size: 11px;
   color: var(--text-muted);

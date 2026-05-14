@@ -329,19 +329,30 @@ async def api_sp_picker(pool: str = Query("fa")):
             fg_so = steamer.get("SO") or zips.get("SO")
             fg_ip = steamer.get("IP") or zips.get("IP")
             fg_gs = steamer.get("GS") or zips.get("GS")
+            fg_k9 = steamer.get("K/9") or zips.get("K/9")
             if fg_gs and fg_gs > 0:
-                proj_k = round(fg_so / fg_gs, 1) if fg_so else None
                 proj_ip = round(fg_ip / fg_gs, 1) if fg_ip else None
+                proj_k = round(fg_so / fg_gs, 1) if fg_so else None
             else:
                 espn_k = rec.pitcher.projected_stats.get("K") or rec.pitcher.stats.get("K")
                 espn_outs = rec.pitcher.projected_stats.get("OUTS") or rec.pitcher.stats.get("OUTS")
                 espn_gs = rec.pitcher.projected_stats.get("GS") or rec.pitcher.stats.get("GS")
                 if espn_gs and espn_gs > 0:
-                    proj_k = round(espn_k / espn_gs, 1) if espn_k else None
                     proj_ip = round((espn_outs / 3) / espn_gs, 1) if espn_outs else None
+                    proj_k = round(espn_k / espn_gs, 1) if espn_k else None
                 else:
-                    proj_k = None
                     proj_ip = None
+                    proj_k = None
+            # Clamp to realistic single-game ranges (total IP includes relief innings)
+            if proj_ip is not None and proj_ip > 8.0:
+                proj_ip = 5.5
+                if fg_k9:
+                    proj_k = round(fg_k9 * proj_ip / 9, 1)
+            if proj_k is not None and proj_k > 13.0:
+                if fg_k9 and proj_ip:
+                    proj_k = round(fg_k9 * proj_ip / 9, 1)
+                else:
+                    proj_k = min(proj_k, 13.0)
 
         # Log first pitcher's available data for debugging
         if not by_date:

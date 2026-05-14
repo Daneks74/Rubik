@@ -197,7 +197,7 @@ async function renderSPPicker(el) {
       } else {
         html += `<td>${p.pct_owned}%</td>`;
       }
-      if (data.has_odds) html += `<td>${fmtML(p.moneyline)}</td><td>${p.over_under || '—'}</td>`;
+      if (data.has_odds) html += `<td>${fmtML(p.moneyline)}</td><td>${p.over_under != null ? Number(p.over_under).toFixed(1) : '—'}</td>`;
       html += `<td>${p.opp_record || '—'}</td>
         <td><span class="score-badge ${sc}">${p.score}</span></td></tr>`;
     });
@@ -219,7 +219,7 @@ async function renderSPPicker(el) {
               ? `<span>K/9: ${fmtStat(p.k9, 'K/9')}</span>`
               : `<span>Own: ${p.pct_owned}%</span>`}
             ${p.win_prob ? `<span>Win: ${p.win_prob}%</span>` : ''}
-            ${data.has_odds && p.over_under ? `<span>O/U: ${p.over_under}</span>` : ''}
+            ${data.has_odds && p.over_under != null ? `<span>O/U: ${Number(p.over_under).toFixed(1)}</span>` : ''}
           </div>
         </div>
         <div class="pitcher-card-right">

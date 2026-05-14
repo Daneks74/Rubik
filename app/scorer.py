@@ -38,6 +38,9 @@ def score_pitcher(
             win_prob = odds.home_implied_prob
         else:
             win_prob = odds.away_implied_prob
+        # Clamp to realistic baseball range — no single game is >80% certain
+        if win_prob:
+            win_prob = max(0.25, min(0.80, win_prob))
         breakdown["matchup"] = win_prob if win_prob else 0.5
     elif team_records:
         # Fallback: estimate win probability from team records using log5 method
