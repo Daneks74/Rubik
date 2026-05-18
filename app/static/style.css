@@ -662,11 +662,13 @@ th[onclick]:hover { color: var(--accent); }
   .pill { padding: 6px 10px; font-size: 11px; }
   .control-group label { font-size: 10px; }
 
-  /* SP Picker / Streamers: show cards instead of tables */
+  /* SP Picker / Streamers / Statcast: show cards instead of tables */
   .sp-table { display: none; }
   .pitcher-cards { display: block; }
   .streamer-table { display: none; }
   .streamer-cards { display: block; }
+  .statcast-table { display: none; }
+  .statcast-cards { display: block; }
 
   /* Summary cards: 2-column on mobile */
   .summary-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
@@ -896,6 +898,13 @@ th[onclick]:hover { color: var(--accent); }
   padding-top: 12px;
   margin-top: 4px;
 }
+
+/* ── Statcast diff coloring ── */
+.diff-pos { color: var(--green); font-weight: 600; }
+.diff-neg { color: var(--red); font-weight: 600; }
+.diff-neutral { color: var(--text-muted); }
+
+.statcast-cards { display: none; }
 
 /* ── Small phones: < 390px ── */
 @media (max-width: 390px) {

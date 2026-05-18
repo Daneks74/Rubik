@@ -16,6 +16,7 @@ from app.odds_client import get_mlb_odds
 from app.projections_client import fetch_all_projections, get_player_projections, _normalize_player_name
 from app.matcher import match_pitchers_to_starts, match_start_to_odds
 from app.scorer import score_pitcher, rank_recommendations
+from app.statcast_client import fetch_expected_stats
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ _config: AppConfig | None = None
 _espn_clients: dict[int, ESPNClient] = {}
 _active_league_id: int | None = None
 _projections_cache: dict | None = None
+_statcast_cache: list | None = None
 
 
 def get_config() -> AppConfig:
@@ -819,6 +821,29 @@ async def api_free_agents(
 
 
 # ──────────────────────────────────────────────
+# API: Statcast xStats (public — no ESPN needed)
+# ──────────────────────────────────────────────
+
+@app.get("/api/statcast")
+async def api_statcast(min_pa: int = Query(50, ge=1, le=500)):
+    config = get_config()
+    year = config.season_year
+
+    global _statcast_cache
+    if _statcast_cache is None:
+        _statcast_cache = fetch_expected_stats(year, min_pa=25)
+
+    filtered = [p for p in _statcast_cache if p["pa"] >= min_pa]
+
+    return {
+        "players": filtered,
+        "year": year,
+        "min_pa": min_pa,
+        "total": len(filtered),
+    }
+
+
+# ──────────────────────────────────────────────
 # API: Positions + Refresh
 # ──────────────────────────────────────────────
 
@@ -829,7 +854,8 @@ async def api_positions():
 
 @app.post("/api/refresh-projections")
 async def api_refresh_projections():
-    global _projections_cache
+    global _projections_cache, _statcast_cache
+    _statcast_cache = None
     _projections_cache = None
     get_projections()
     return {"status": "ok", "sources": list((_projections_cache or {}).keys())}

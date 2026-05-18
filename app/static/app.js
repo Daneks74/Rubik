@@ -23,6 +23,8 @@ const state = {
   backendStatus: null,
   streamerFilter: 'all',
   expandedStreamer: null,
+  statcastData: null,
+  statcastMinPA: 50,
 };
 
 // ── API helpers ──
@@ -81,6 +83,7 @@ async function renderPage() {
     switch (state.currentPage) {
       case 'sp-picker': await renderSPPicker(content); break;
       case 'streamers': await renderStreamers(content); break;
+      case 'statcast': await renderStatcast(content); break;
       case 'rankings': await renderRankings(content); break;
       case 'my-roster': await renderMyRoster(content); break;
       case 'free-agents': await renderFreeAgents(content); break;
@@ -237,6 +240,149 @@ function setSpPool(pool) {
   state.spPool = pool;
   state.spData = null;
   renderPage();
+}
+
+// ── Statcast xStats ──
+
+async function renderStatcast(el) {
+  if (!state.statcastData) state.statcastData = await api(`/api/statcast?min_pa=${state.statcastMinPA}`);
+  const data = state.statcastData;
+  const players = data.players || [];
+
+  let html = `
+    <div class="page-header">
+      <h2>Statcast xStats</h2>
+      <p>Expected vs actual on-base stats — ${data.year} season</p>
+    </div>
+    <div class="controls">
+      <div class="control-group">
+        <label>Min PA</label>
+        <div class="pill-group">
+          ${[25, 50, 100, 200].map(pa => `<button class="pill ${state.statcastMinPA === pa ? 'active' : ''}" onclick="setStatcastMinPA(${pa})">${pa}</button>`).join('')}
+        </div>
+      </div>
+    </div>`;
+
+  if (players.length === 0) {
+    html += '<div class="empty-state"><p>No Statcast data available.</p></div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  html += `<div class="summary-row">
+    <div class="summary-card"><div class="label">Players</div><div class="value accent">${data.total}</div></div>
+    <div class="summary-card"><div class="label">Min PA</div><div class="value">${data.min_pa}</div></div>
+    <div class="summary-card"><div class="label">Season</div><div class="value">${data.year}</div></div>
+  </div>`;
+
+  // Desktop table
+  html += `<div class="table-wrap statcast-table"><table data-table="statcast">
+    <thead><tr>
+      <th onclick="sortStatcastTable('name')">Player</th>
+      <th onclick="sortStatcastTable('pa')">PA</th>
+      <th onclick="sortStatcastTable('obp')">OBP</th>
+      <th onclick="sortStatcastTable('xobp')">xOBP</th>
+      <th onclick="sortStatcastTable('obp_diff')">Diff</th>
+      <th onclick="sortStatcastTable('ba')">AVG</th>
+      <th onclick="sortStatcastTable('xba')">xAVG</th>
+      <th onclick="sortStatcastTable('ba_diff')">Diff</th>
+      <th onclick="sortStatcastTable('woba')">wOBA</th>
+      <th onclick="sortStatcastTable('xwoba')">xwOBA</th>
+      <th onclick="sortStatcastTable('woba_diff')">Diff</th>
+    </tr></thead><tbody>`;
+
+  for (const p of players) {
+    html += `<tr>
+      <td><span class="player-name">${p.name}</span></td>
+      <td>${p.pa}</td>
+      <td>${p.obp.toFixed(3)}</td>
+      <td>${p.xobp.toFixed(3)}</td>
+      <td><span class="${diffClass(p.obp_diff)}">${fmtDiff(p.obp_diff)}</span></td>
+      <td>${p.ba.toFixed(3)}</td>
+      <td>${p.xba.toFixed(3)}</td>
+      <td><span class="${diffClass(p.ba_diff)}">${fmtDiff(p.ba_diff)}</span></td>
+      <td>${p.woba.toFixed(3)}</td>
+      <td>${p.xwoba.toFixed(3)}</td>
+      <td><span class="${diffClass(p.woba_diff)}">${fmtDiff(p.woba_diff)}</span></td>
+    </tr>`;
+  }
+
+  html += '</tbody></table></div>';
+
+  // Mobile cards
+  html += '<div class="statcast-cards">';
+  for (const p of players) {
+    html += `<div class="pitcher-card">
+      <div class="pitcher-card-left" style="width:100%">
+        <div class="pc-name">${p.name} <span style="color:var(--text-muted);font-weight:400">PA: ${p.pa}</span></div>
+        <div class="pc-details" style="margin-top:8px">
+          <span>OBP: ${p.obp.toFixed(3)}</span>
+          <span>xOBP: ${p.xobp.toFixed(3)}</span>
+          <span class="${diffClass(p.obp_diff)}">${fmtDiff(p.obp_diff)}</span>
+        </div>
+        <div class="pc-details">
+          <span>AVG: ${p.ba.toFixed(3)}</span>
+          <span>xAVG: ${p.xba.toFixed(3)}</span>
+          <span class="${diffClass(p.ba_diff)}">${fmtDiff(p.ba_diff)}</span>
+        </div>
+        <div class="pc-details">
+          <span>wOBA: ${p.woba.toFixed(3)}</span>
+          <span>xwOBA: ${p.xwoba.toFixed(3)}</span>
+          <span class="${diffClass(p.woba_diff)}">${fmtDiff(p.woba_diff)}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function diffClass(diff) {
+  if (diff > 0.015) return 'diff-pos';
+  if (diff < -0.015) return 'diff-neg';
+  return 'diff-neutral';
+}
+
+function fmtDiff(diff) {
+  const sign = diff > 0 ? '+' : '';
+  return sign + diff.toFixed(3);
+}
+
+function setStatcastMinPA(pa) {
+  state.statcastMinPA = pa;
+  state.statcastData = null;
+  renderPage();
+}
+
+let statcastSortState = {};
+function sortStatcastTable(key) {
+  const table = document.querySelector('table[data-table="statcast"]');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+
+  const prev = statcastSortState.key;
+  const asc = (prev === key) ? !statcastSortState.asc : (key === 'name');
+  statcastSortState = { key, asc };
+
+  const headers = Array.from(table.querySelectorAll('thead th'));
+  const colIdx = headers.findIndex(h => {
+    const oc = h.getAttribute('onclick') || '';
+    return oc.includes(`'${key}'`);
+  });
+  if (colIdx < 0) return;
+
+  rows.sort((a, b) => {
+    const aText = a.cells[colIdx]?.textContent?.trim() || '';
+    const bText = b.cells[colIdx]?.textContent?.trim() || '';
+    const aNum = parseFloat(aText.replace(/[^0-9.\-]/g, ''));
+    const bNum = parseFloat(bText.replace(/[^0-9.\-]/g, ''));
+    if (!isNaN(aNum) && !isNaN(bNum)) return asc ? aNum - bNum : bNum - aNum;
+    return asc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+  });
+
+  rows.forEach(r => tbody.appendChild(r));
 }
 
 // ── Streamers ──
